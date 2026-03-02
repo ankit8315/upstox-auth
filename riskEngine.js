@@ -1,7 +1,7 @@
 // riskEngine.js - Position sizing, SL/target calc, open position tracking
 
-const RISK_PER_TRADE = 500;
-const TOTAL_CAPITAL = 100000;
+const RISK_PER_TRADE = 50;
+const TOTAL_CAPITAL = 1000;
 const MAX_POSITIONS = 3;
 const MAX_SINGLE_STOCK_PCT = 0.30;
 const MIN_RR_RATIO = 1.5;
