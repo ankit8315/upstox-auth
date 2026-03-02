@@ -1,0 +1,28 @@
+name: Deploy to GCP
+on:
+  push:
+    branches:
+      - main
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.GCP_SSH_KEY }}" > ~/.ssh/gcp_key
+          chmod 600 ~/.ssh/gcp_key
+          ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
+      - name: Copy files to GCP
+        run: |
+          scp -i ~/.ssh/gcp_key *.js ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:~/upstox-auth/
+      - name: Restart PM2
+        run: |
+          ssh -i ~/.ssh/gcp_key ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "cd ~/upstox-auth && pm2 restart upstox-scanner --update-env && pm2 save"
+      - name: Health check
+        run: |
+          sleep 5
+          ssh -i ~/.ssh/gcp_key ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "pm2 logs upstox-scanner --nostream --lines 10"
