@@ -11,10 +11,11 @@
 const { fetchNews }           = require("./newsService");
 const { fetchFIIDII }         = require("./fiiService");
 const { fetchSectors }        = require("./sectorService");
-const { generateResearch }    = require("./aiResearcher");
+const { generateResearch, getMarketPhase } = require("./aiResearcher");
 const { enrichWatchlist }     = require("./stockIntelligence");
 const { generateTradeCalls, checkTheses } = require("./traderBrain");
 const { getFallbackWatchlist } = require("./fnoRegistry");
+const { refreshAll: refreshNewsEngine, symbolNews } = require("./newsEngine");
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -84,16 +85,30 @@ async function refreshResearch() {
     console.log("[Research] Data fetched: news=" + newsData.length + " sectors=" + (sectorsData.sectors || []).length);
 
     // ── Step 2: AI deep research ──────────────────────────────────────────────
-    // Runs even when news is thin — aiResearcher handles empty news gracefully.
-    // BUG FIX: removed the old   `if (newsData.length > 0)`  guard that was
-    //          blocking the entire pipeline when news fetch returned [].
+    // Works in ALL market phases — overnight, pre-market, and intraday.
+    // Overnight: does tomorrow's homework using news + FII + earnings calendar.
+    // Intraday:  live causal chain analysis with sector data.
+    const marketPhase = getMarketPhase();
+    console.log("[Research] Market phase: " + marketPhase);
+
+    // Collect upcoming earnings/board meetings from newsEngine symbol store
+    const upcomingEarnings = Object.entries(symbolNews || {})
+      .flatMap(([sym, events]) =>
+        (events || [])
+          .filter(e => e.type === "board_meeting")
+          .map(e => ({ symbol: sym.replace("NSE_EQ|", ""), purpose: e.purpose, date: e.meetingDate }))
+      )
+      .slice(0, 20);
+
     try {
-      const aiReport = await generateResearch(newsData, fiidiiData, sectorsData);
+      const aiReport = await generateResearch(newsData, fiidiiData, sectorsData, upcomingEarnings);
       if (aiReport) {
         global.researchData.aiReport = aiReport;
-        console.log("[Research] AI done: bias=" + ((aiReport.marketOutlook || {}).bias || "?") +
+        console.log(
+          "[Research] AI done (" + (aiReport.mode || marketPhase) + "): bias=" + ((aiReport.marketOutlook || {}).bias || "?") +
           " watchlist=" + (aiReport.watchlist || []).length +
-          " chains="    + (aiReport.causalChains || []).length);
+          " chains=" + (aiReport.causalChains || []).length
+        );
       } else {
         console.warn("[Research] AI returned null — will use fallback watchlist");
       }

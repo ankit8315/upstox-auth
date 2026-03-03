@@ -11,6 +11,7 @@
 //      the empty-result path to always return an object, never a bare [].
 
 const axios = require("axios");
+const { getMarketPhase } = require("./aiResearcher");
 
 // ── Constants matching riskEngine ────────────────────────────────────────────
 const CAPITAL         = 100000;
@@ -114,6 +115,131 @@ function calcPosition(entryPrice, stopLoss, capital, openPositions) {
       ? (openPositions >= MAX_POSITIONS ? "Max 3 positions open" : "Insufficient capital")
       : null
   };
+}
+
+// ── BUILD PROMPT: overnight / pre-market plan (no live prices needed) ──────────
+// A real trader writes tomorrow's plan at night: specific entries, levels, WHY.
+// This runs when market is closed so the app always shows actionable ideas.
+function buildOvernightTradePrompt(enrichedStocks, aiReport, ist) {
+  const watchlistText = enrichedStocks.slice(0, 12).map((s, i) => {
+    const ld = s.liveData || {};
+    return `
+${i+1}. ${s.symbol} [Conviction: ${s.conviction}/100 | ${s.trafficLight}]
+   Last close: ₹${ld.ltp || ld.prevClose || "?"}
+   52W: High ₹${ld.high52 || "?"} Low ₹${ld.low52 || "?"} | Range position: ${(ld.pos52wPct || 0).toFixed(0)}%
+   Support: S1=₹${(ld.support || {}).s1 || "?"} | Resistance: R1=₹${(ld.resistance || {}).r1 || "?"}
+   Delivery%: ${(s.deliveryData || {}).deliveryPct || "?"}% | PCR: ${((s.oiData || {}).pcr || 0).toFixed(2)}
+   Volume trend: ${(s.volumeData || {}).volumeLabel || "?"}
+   AI Thesis: ${s.thesis || ""}
+   Causal chain: ${s.causalReasoning || ""}
+   Signals: ${(s.signals || []).map(sg => sg.label).join(", ") || "none"}`;
+  }).join("
+");
+
+  const outlook = aiReport && aiReport.marketOutlook ? aiReport.marketOutlook : {};
+  const premarketBriefing = aiReport && aiReport.premarketBriefing ? aiReport.premarketBriefing : {};
+
+  return `You are a profitable NSE intraday trader. It is ${ist} IST — market is CLOSED.
+You are writing your trading plan for TOMORROW.
+
+TOMORROW'S MARKET OUTLOOK (from research):
+Bias: ${outlook.bias || "unknown"} | Confidence: ${outlook.confidence || "?"}/10
+Opening expectation: ${outlook.openingExpectation || "unknown"}
+Summary: ${outlook.summary || "unavailable"}
+First trade idea: ${premarketBriefing.firstTrade || "not available"}
+
+CAPITAL: ₹1,00,000 | Risk per trade: ₹500 | Max 3 trades | Max loss/day: ₹3,000
+
+WATCHLIST STOCKS WITH DATA:
+${watchlistText}
+
+YOUR TASK: Write tomorrow's complete trading plan.
+Think through each stock like you're sitting at your terminal at 9pm:
+- What price do I want to buy tomorrow morning?
+- What's my stop loss level (below what structure)?
+- Where do I take profit 1 and profit 2?
+- What's the exact sequence — do I buy at open, or wait for first 15-min candle close?
+- What would make me NOT take this trade (invalidation)?
+
+POSITION MATH RULES (I will verify):
+- Qty = floor(500 / (entryPrice - stopLoss))
+- Deployed = qty × entryPrice (max ₹30,000 per stock)
+- Risk = qty × (entry - stopLoss) ≤ ₹500
+
+URGENCY FOR TOMORROW:
+- AT_OPEN: buy first candle if it opens at this level
+- FIRST_15MIN_BREAKOUT: buy only if first 15-min candle breaks above X
+- WAIT_FOR_PULLBACK: stock may gap up — wait for dip before entering
+- WATCH_ONLY: no trade yet, just monitor for setup to develop
+
+Respond ONLY in valid JSON (no markdown):
+{
+  "timestamp": "${new Date().toISOString()}",
+  "mode": "OVERNIGHT_PLAN",
+  "traderMindset": "1 sentence — what kind of day tomorrow looks like and your approach",
+  "marketRead": {
+    "niftyBias":       "BULL | BEAR | SIDEWAYS",
+    "sessionPhase":    "PRE_MARKET",
+    "tradingAdvice":   "1 line — how aggressive to be tomorrow at open",
+    "openingStrategy": "what to do in first 15 minutes",
+    "avoidIf":         "condition that would make you not trade tomorrow at all"
+  },
+  "tradeCalls": [
+    {
+      "rank":        1,
+      "symbol":      "EXACT_NSE_SYMBOL",
+      "action":      "BUY | SHORT",
+      "urgency":     "AT_OPEN | FIRST_15MIN_BREAKOUT | WAIT_FOR_PULLBACK | WATCH_ONLY",
+      "grade":       "A+ | A | B",
+      "entryType":   "FIRST_15MIN_BREAKOUT | GAP_AND_GO | SUPPORT_BUY | VWAP_RECLAIM | NEWS_CATALYST",
+      "entryPrice":  0,
+      "entryNote":   "exactly when and how to enter — e.g. Buy above ₹X if first 15-min candle closes green with volume",
+      "stopLoss":    0,
+      "slNote":      "what this SL level represents structurally",
+      "target1":     0,
+      "target2":     0,
+      "t1Note":      "why this target — what level it represents",
+      "trailSlAfterT1": 0,
+      "quantity":    0,
+      "deployed":    0,
+      "riskAmount":  0,
+      "rewardT1":    0,
+      "rewardT2":    0,
+      "rrRatio":     "1:X",
+      "holdTime":    "15-30 min | 30-60 min | 1-2 hours | full day",
+      "exitBy":      "e.g. 11:00 AM | 1:00 PM",
+      "whyNow":      "3-4 sentences — specific data and reasoning for this stock tomorrow",
+      "thesis":      "if X happens this stock does Y because Z",
+      "invalidateIf":"exact condition — if this happens at open, skip the trade",
+      "confidence":  80,
+      "risks":       ["risk 1", "risk 2"]
+    }
+  ],
+  "capitalPlan": {
+    "tradesPlanned":    2,
+    "totalDeployed":    40000,
+    "totalRisk":        1000,
+    "bestCaseProfit":   3000,
+    "worstCaseLoss":    1000,
+    "adviceIfAllHit":   "what to do if targets hit before noon",
+    "adviceIfAllStop":  "what to do if stop losses hit in morning"
+  },
+  "skipList": [
+    { "symbol": "SYMBOL", "reason": "why avoiding tomorrow specifically" }
+  ],
+  "intraday5MinChecklist": [
+    "What to check at 9:15am open",
+    "What to check after first 15 min candle closes",
+    "What Nifty level to watch as confirmation"
+  ]
+}
+
+RULES:
+1. Only real NSE symbols.
+2. Every trade must have a clear causal reason tied to news or data.
+3. invalidateIf is critical — define the exact condition that makes you skip.
+4. Be specific about price levels. Use the 52W data and support/resistance provided.
+5. If no good setup exists for tomorrow, say 0 calls and explain why.`;
 }
 
 // ── BUILD PROMPT: generate fresh trade calls ──────────────────────────────────
@@ -376,10 +502,17 @@ async function generateTradeCalls(enrichedStocks, marketContext, openPositions, 
   }
 
   const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-  console.log("[TraderBrain] Generating trade calls at " + ist);
+  const phase = getMarketPhase();
+  const isOvernight = (phase === "OVERNIGHT" || phase === "PRE_MARKET");
+  console.log("[TraderBrain] Generating trade calls at " + ist + " [" + phase + "]");
 
   try {
-    const prompt  = buildTradeCallPrompt(enrichedStocks, marketContext, openPositions, todayPnL || 0, ist);
+    // Overnight: write tomorrow's plan (no live prices needed — uses 52W data, thesis, causal chains)
+    // Intraday: live trade calls with current price action
+    const aiReport = global.researchData && global.researchData.aiReport;
+    const prompt = isOvernight
+      ? buildOvernightTradePrompt(enrichedStocks, aiReport, ist)
+      : buildTradeCallPrompt(enrichedStocks, marketContext, openPositions, todayPnL || 0, ist);
     const raw     = await callAI(prompt, 4000);
     const clean   = raw.replace(/```json|```/g, "").trim();
     const parsed  = JSON.parse(clean);
