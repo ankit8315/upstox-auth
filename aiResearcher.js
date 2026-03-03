@@ -34,20 +34,36 @@ function getProvider() {
   return null;
 }
 
+let aiRateLimitUntil = 0;
+
 async function callAI(prompt, maxTokens = 4000) {
   const provider = getProvider();
   if (!provider) throw new Error("No AI key set in .env (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY)");
 
+  // 429 backoff — don't hammer the API after a rate limit
+  if (Date.now() < aiRateLimitUntil) {
+    const sec = Math.round((aiRateLimitUntil - Date.now()) / 1000);
+    throw new Error("Rate limit cooldown — " + sec + "s remaining. Use cached result.");
+  }
+
   if (provider === "anthropic") {
-    const r = await axios.post("https://api.anthropic.com/v1/messages", {
-      model:      "claude-sonnet-4-20250514",
-      max_tokens: maxTokens,
-      messages:   [{ role: "user", content: prompt }]
-    }, {
-      headers: { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      timeout: 60000
-    });
-    return r.data.content[0].text;
+    try {
+      const r = await axios.post("https://api.anthropic.com/v1/messages", {
+        model:      "claude-haiku-4-5-20251001",
+        max_tokens: maxTokens,
+        messages:   [{ role: "user", content: prompt }]
+      }, {
+        headers: { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+        timeout: 90000
+      });
+      return r.data.content[0].text;
+    } catch (err) {
+      if (err.response && err.response.status === 429) {
+        aiRateLimitUntil = Date.now() + 20 * 60 * 1000; // back off 20 min
+        console.warn("[aiResearcher] 429 rate limit — cooling down 20 min");
+      }
+      throw err;
+    }
   }
 
   if (provider === "openai") {
@@ -90,7 +106,7 @@ function getMarketPhase() {
 // This is what a real trader does at 9pm: reads all news, marks key levels,
 // writes a trading plan for tomorrow with specific stocks, entries, and reasons.
 function buildOvernightPrompt(news, fiidii, sectors, upcomingEarnings, ist) {
-  const allNews = news.slice(0, 30).map((n, i) =>
+  const allNews = news.slice(0, 50).map((n, i) =>
     `${i+1}. [${(n.category || "general").toUpperCase()}] ${n.title}\n   ${n.summary ? n.summary.slice(0, 180) : ""}\n   Source: ${n.source} | ${n.publishedAt ? n.publishedAt.slice(0, 16) : ""}`
   ).join("\n\n");
 

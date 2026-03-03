@@ -22,10 +22,13 @@ const MAX_DAILY_LOSS  = 3000; // 3% of capital — hard stop for the day
 // ── Cache ─────────────────────────────────────────────────────────────────────
 // BUG FIX: was { calls: [], generatedAt: 0 } — .calls here was the result
 // object slot, not an array, so .calls.length always threw / returned undefined.
-let tradeCallsCache    = { result: null, generatedAt: 0 };
-let thesisCheckCache   = { updates: null, checkedAt: 0 };
-const CALL_TTL_MS      = 5 * 60 * 1000;
-const THESIS_TTL_MS    = 5 * 60 * 1000;
+let tradeCallsCache       = { result: null, generatedAt: 0 };
+let thesisCheckCache      = { updates: null, checkedAt: 0 };
+let rateLimitBackoffUntil = 0;  // epoch ms — don't call AI until this time if 429 hit
+const CALL_TTL_INTRADAY_MS  =  5 * 60 * 1000;   // 5 min during market hours
+const CALL_TTL_OVERNIGHT_MS = 45 * 60 * 1000;   // 45 min overnight
+const CALL_TTL_MS           =  5 * 60 * 1000;   // kept for legacy refs
+const THESIS_TTL_MS         =  5 * 60 * 1000;
 
 // Empty result object — returned instead of [] so callers always get .calls
 const EMPTY_RESULT = { calls: [], traderMindset: "", marketRead: {}, capitalPlan: {}, skipList: [], checklist: [] };
@@ -533,9 +536,21 @@ async function generateTradeCalls(enrichedStocks, marketContext, openPositions, 
 
   // BUG FIX: cache hit check now checks tradeCallsCache.result (an object) not
   // tradeCallsCache.calls (which was undefined, so .length always threw/was falsy)
+  const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+  const phase = getMarketPhase();
+  const isOvernight = (phase === "OVERNIGHT" || phase === "PRE_MARKET");
+  const activeTTL = isOvernight ? CALL_TTL_OVERNIGHT_MS : CALL_TTL_INTRADAY_MS;
+
+  // 429 backoff guard — don't retry until cooldown expires
+  if (now < rateLimitBackoffUntil) {
+    const waitSec = Math.round((rateLimitBackoffUntil - now) / 1000);
+    console.log("[TraderBrain] Rate limit cooldown — waiting " + waitSec + "s. Returning cached.");
+    return tradeCallsCache.result || EMPTY_RESULT;
+  }
+
   const cached = tradeCallsCache.result;
-  if (cached && cached.calls && cached.calls.length > 0 && now - tradeCallsCache.generatedAt < CALL_TTL_MS) {
-    console.log("[TraderBrain] Returning cached calls (" + cached.calls.length + ")");
+  if (cached && cached.calls && cached.calls.length > 0 && now - tradeCallsCache.generatedAt < activeTTL) {
+    console.log("[TraderBrain] Returning cached calls (" + cached.calls.length + ") [TTL " + Math.round(activeTTL/60000) + "min]");
     return cached;
   }
 
@@ -543,10 +558,6 @@ async function generateTradeCalls(enrichedStocks, marketContext, openPositions, 
     console.warn("[TraderBrain] No enriched stocks — skipping");
     return EMPTY_RESULT;
   }
-
-  const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-  const phase = getMarketPhase();
-  const isOvernight = (phase === "OVERNIGHT" || phase === "PRE_MARKET");
   console.log("[TraderBrain] Generating trade calls at " + ist + " [" + phase + "]");
 
   try {
@@ -610,7 +621,12 @@ async function generateTradeCalls(enrichedStocks, marketContext, openPositions, 
 
   } catch (e) {
     console.error("[TraderBrain] Error:", e.message);
-    // BUG FIX: return the cached result object (not []) so callers always get .calls
+    // If 429 rate limit, back off for 20 minutes before retrying
+    if (e.message && (e.message.includes("429") || e.message.includes("rate"))) {
+      rateLimitBackoffUntil = Date.now() + 20 * 60 * 1000;
+      console.warn("[TraderBrain] 429 rate limit — backing off 20 min until " +
+        new Date(rateLimitBackoffUntil).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" }) + " IST");
+    }
     return tradeCallsCache.result || EMPTY_RESULT;
   }
 }

@@ -101,10 +101,22 @@ async function fetchNSEQuote(symbol) {
     return data;
 
   } catch (e) {
-    console.error("Quote fetch failed for " + symbol + ":", e.message);
+    // 401 = Upstox token expired (daily token, needs manual refresh in .env)
+    // 429 = rate limited — both are expected, log once per symbol not every cycle
+    if (e.response && e.response.status === 401) {
+      // Only log once per hour per 401 — don't spam
+      if (!stockIntelligence._401warned || Date.now() - stockIntelligence._401warned > 60*60*1000) {
+        console.error("[stockIntelligence] Upstox token expired (401) — update UPSTOX_ACCESS_TOKEN in .env");
+        stockIntelligence._401warned = Date.now();
+      }
+    } else {
+      console.error("Quote fetch failed for " + symbol + ":", e.message);
+    }
     return { symbol, error: e.message, fetchedAt: Date.now() };
   }
 }
+
+const stockIntelligence = { _401warned: 0 };
 
 // ── Fetch F&O OI data — NSE option chain blocked from GCP, skip gracefully ────
 async function fetchOIData(symbol) {
