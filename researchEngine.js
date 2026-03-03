@@ -1,6 +1,12 @@
 // researchEngine.js — Orchestrates all research services
 // Runs every 5 minutes always (market open or closed)
 // Exposes data via global.researchData
+//
+// FIX 1: Pipeline no longer blocked when newsData is empty.
+//         AI research runs regardless; watchlist enrichment falls back
+//         to top F&O liquid stocks so the Watchlist tab always shows data.
+// FIX 2: tradeCalls result is normalised to always be an object with a
+//         .calls array, fixing "No trades today" when AI returns [] on error.
 
 const { fetchNews }           = require("./newsService");
 const { fetchFIIDII }         = require("./fiiService");
@@ -11,103 +17,205 @@ const { generateTradeCalls, checkTheses } = require("./traderBrain");
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
+// ── Fallback watchlist ─────────────────────────────────────────────────────────
+// Used when AI hasn't responded yet or news is thin.
+// Always gives the Watchlist tab something to show.
+const FALLBACK_WATCHLIST = [
+  { symbol: "RELIANCE",   companyName: "Reliance Industries", sector: "Energy",  tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+  { symbol: "HDFCBANK",   companyName: "HDFC Bank",           sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+  { symbol: "INFY",       companyName: "Infosys",             sector: "IT",      tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+  { symbol: "ICICIBANK",  companyName: "ICICI Bank",          sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+  { symbol: "TCS",        companyName: "TCS",                 sector: "IT",      tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+  { symbol: "SBIN",       companyName: "State Bank of India", sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+  { symbol: "TATAMOTORS", companyName: "Tata Motors",         sector: "Auto",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+  { symbol: "BAJFINANCE", companyName: "Bajaj Finance",       sector: "Finance", tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+  { symbol: "AXISBANK",   companyName: "Axis Bank",           sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+  { symbol: "KOTAKBANK",  companyName: "Kotak Bank",          sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
+];
+
 // Global research state
 global.researchData = {
-  news:             [],
-  fiidii:           null,
-  sectors:          null,
-  aiReport:         null,
-  enrichedWatchlist:[],
-  tradeCalls:       null,   // ← AI trader's exact calls with math
-  thesisUpdates:    null,   // ← 5-min re-evaluation
-  lastUpdate:       null,
-  isRefreshing:     false
+  news:              [],
+  fiidii:            null,
+  sectors:           null,
+  aiReport:          null,
+  enrichedWatchlist: [],
+  tradeCalls:        null,
+  thesisUpdates:     null,
+  lastUpdate:        null,
+  isRefreshing:      false
 };
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function isMarketOpen() {
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const d = now.getDay(), h = now.getHours(), m = now.getMinutes();
+  if (d === 0 || d === 6) return false;
+  if (h < 9 || (h === 9 && m < 15)) return false;
+  if (h > 15 || (h === 15 && m > 35)) return false;
+  return true;
+}
+
+// Normalise whatever generateTradeCalls returns into { calls[], ... }
+function normaliseTradeCalls(raw) {
+  if (!raw) return { calls: [], traderMindset: "", marketRead: {} };
+  // It returned a proper result object
+  if (typeof raw === "object" && !Array.isArray(raw) && raw.calls) return raw;
+  // It returned an array directly (shouldn't happen but guard anyway)
+  if (Array.isArray(raw)) return { calls: raw, traderMindset: "", marketRead: {} };
+  return { calls: [], traderMindset: "", marketRead: {} };
+}
+
+// ── Main refresh ──────────────────────────────────────────────────────────────
 
 async function refreshResearch() {
   if (global.researchData.isRefreshing) return;
   global.researchData.isRefreshing = true;
 
   const start = Date.now();
-  console.log("Research refresh started...");
+  console.log("[Research] Refresh started...");
 
   try {
-    // Step 1: All data sources in parallel
-    const [news, fiidii, sectors] = await Promise.allSettled([
+    // ── Step 1: Fetch all data sources in parallel ────────────────────────────
+    const [newsResult, fiidiiResult, sectorsResult] = await Promise.allSettled([
       fetchNews(),
       fetchFIIDII(),
       fetchSectors()
     ]);
 
-    const newsData    = news.status    === "fulfilled" ? news.value    : [];
-    const fiidiiData  = fiidii.status  === "fulfilled" ? fiidii.value  : {};
-    const sectorsData = sectors.status === "fulfilled" ? sectors.value : { sectors: [], breadth: {} };
+    const newsData    = newsResult.status    === "fulfilled" ? (newsResult.value    || []) : [];
+    const fiidiiData  = fiidiiResult.status  === "fulfilled" ? (fiidiiResult.value  || {}) : {};
+    const sectorsData = sectorsResult.status === "fulfilled" ? (sectorsResult.value || { sectors: [], breadth: {} }) : { sectors: [], breadth: {} };
+
+    if (newsResult.status    === "rejected") console.warn("[Research] News fetch failed:", newsResult.reason && newsResult.reason.message);
+    if (fiidiiResult.status  === "rejected") console.warn("[Research] FII fetch failed:",  fiidiiResult.reason && fiidiiResult.reason.message);
+    if (sectorsResult.status === "rejected") console.warn("[Research] Sectors fetch failed:", sectorsResult.reason && sectorsResult.reason.message);
 
     global.researchData.news    = newsData;
     global.researchData.fiidii  = fiidiiData;
     global.researchData.sectors = sectorsData;
 
-    // Step 2: AI deep research
-    if (newsData.length > 0) {
+    console.log("[Research] Data fetched: news=" + newsData.length + " sectors=" + (sectorsData.sectors || []).length);
+
+    // ── Step 2: AI deep research ──────────────────────────────────────────────
+    // Runs even when news is thin — aiResearcher handles empty news gracefully.
+    // BUG FIX: removed the old   `if (newsData.length > 0)`  guard that was
+    //          blocking the entire pipeline when news fetch returned [].
+    try {
       const aiReport = await generateResearch(newsData, fiidiiData, sectorsData);
       if (aiReport) {
         global.researchData.aiReport = aiReport;
+        console.log("[Research] AI done: bias=" + ((aiReport.marketOutlook || {}).bias || "?") +
+          " watchlist=" + (aiReport.watchlist || []).length +
+          " chains="    + (aiReport.causalChains || []).length);
+      } else {
+        console.warn("[Research] AI returned null — will use fallback watchlist");
+      }
+    } catch (e) {
+      console.error("[Research] AI research error (non-fatal):", e.message);
+    }
 
-        // Step 3: Enrich every AI-recommended stock with live NSE data
-        if (aiReport.watchlist && aiReport.watchlist.length > 0) {
-          const enriched = await enrichWatchlist(aiReport.watchlist);
-          global.researchData.enrichedWatchlist = enriched;
-          console.log("Enriched " + enriched.length + " stocks | Top: " +
-            (enriched[0] || {}).symbol + " conviction=" + (enriched[0] || {}).conviction);
+    // ── Step 3: Decide which watchlist to enrich ──────────────────────────────
+    // Priority: AI watchlist → fallback F&O list
+    // This guarantees enrichedWatchlist is NEVER empty after the first run.
+    const aiWatchlist = global.researchData.aiReport &&
+                        Array.isArray(global.researchData.aiReport.watchlist) &&
+                        global.researchData.aiReport.watchlist.length > 0
+      ? global.researchData.aiReport.watchlist
+      : null;
 
-          // Step 4: TraderBrain — generate exact trade calls with math
-          // Runs always (pre-market prep + live market calls)
-          try {
-            const openPositions  = require("./riskEngine").getOpenPositions();
-            const todayPnL       = require("./riskEngine").getTodayPnL();
-            const marketContext  = global.niftyContext || null;
+    const watchlistToEnrich = aiWatchlist || FALLBACK_WATCHLIST;
+    const usingFallback     = !aiWatchlist;
 
-            const tradeCalls = await generateTradeCalls(
-              enriched,
-              marketContext,
-              openPositions,
-              todayPnL
-            );
+    if (usingFallback) {
+      console.log("[Research] Using fallback watchlist (" + FALLBACK_WATCHLIST.length + " F&O stocks)");
+    }
+
+    // ── Step 4: Enrich watchlist with live NSE data ───────────────────────────
+    try {
+      const enriched = await enrichWatchlist(watchlistToEnrich);
+      if (enriched && enriched.length > 0) {
+        global.researchData.enrichedWatchlist = enriched;
+        console.log("[Research] Enriched " + enriched.length + " stocks | Top: " +
+          (enriched[0] || {}).symbol + " conviction=" + (enriched[0] || {}).conviction);
+      } else {
+        // enrichWatchlist returned [] — keep existing enrichedWatchlist if we have it
+        if (global.researchData.enrichedWatchlist.length === 0) {
+          // First run, nothing yet — set minimal stubs so iOS never sees empty
+          global.researchData.enrichedWatchlist = watchlistToEnrich.map(w => ({
+            ...w,
+            signals: [], conviction: (w.confidence || 5) * 8, trafficLight: "AMBER"
+          }));
+          console.warn("[Research] Enrichment returned empty — using stub entries");
+        }
+      }
+    } catch (e) {
+      console.error("[Research] Enrichment error (non-fatal):", e.message);
+      // On error keep whatever we already have; don't wipe it
+    }
+
+    // ── Step 5: TraderBrain — generate exact trade calls ──────────────────────
+    // Runs as long as we have enriched stocks (even fallback stubs).
+    // BUG FIX: result is normalised via normaliseTradeCalls() so .calls always
+    //          exists and the iOS "No trades today" guard works correctly.
+    const enriched = global.researchData.enrichedWatchlist;
+    if (enriched && enriched.length > 0) {
+      try {
+        const openPositions = require("./riskEngine").getOpenPositions();
+        const todayPnL      = require("./riskEngine").getTodayPnL();
+        const marketContext = global.niftyContext || null;
+
+        const rawCalls   = await generateTradeCalls(enriched, marketContext, openPositions, todayPnL);
+        const tradeCalls = normaliseTradeCalls(rawCalls);
+
+        // Only replace if we actually got calls (preserve stale good data otherwise)
+        if (tradeCalls.calls && tradeCalls.calls.length > 0) {
+          global.researchData.tradeCalls = tradeCalls;
+          console.log("[Research] TraderBrain: " + tradeCalls.calls.length + " calls generated");
+        } else {
+          // AI returned 0 calls — keep previous if exists, else store the empty object
+          // so the iOS app at least gets traderMindset / marketRead
+          if (!global.researchData.tradeCalls) {
             global.researchData.tradeCalls = tradeCalls;
+          }
+          console.log("[Research] TraderBrain: 0 calls (market conditions or after-hours)");
+        }
 
-            // Step 5: If market is open, also run 5-min thesis check
-            const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-            const h = now.getHours(), m = now.getMinutes(), d = now.getDay();
-            const marketOpen = d >= 1 && d <= 5 && (h > 9 || (h === 9 && m >= 15)) && h < 15;
-
-            if (marketOpen && tradeCalls.calls && tradeCalls.calls.length > 0) {
-              const currentPrices = global.currentPrices || {};
-              const thesisUpdates = await checkTheses(
-                tradeCalls.calls.filter(tc => tc.urgency === "NOW" || tc.enteredAt),
-                currentPrices,
-                marketContext
-              );
+        // ── Step 6: 5-min thesis check (only during market hours) ─────────────
+        const tc = global.researchData.tradeCalls;
+        if (isMarketOpen() && tc && tc.calls && tc.calls.length > 0) {
+          try {
+            const activeCalls   = tc.calls.filter(c => c.urgency === "NOW" || c.enteredAt);
+            const currentPrices = global.currentPrices || {};
+            if (activeCalls.length > 0) {
+              const thesisUpdates = await checkTheses(activeCalls, currentPrices, marketContext);
               global.researchData.thesisUpdates = thesisUpdates;
             }
           } catch (e) {
-            console.error("TraderBrain integration error:", e.message);
+            console.error("[Research] Thesis check error (non-fatal):", e.message);
           }
         }
+      } catch (e) {
+        console.error("[Research] TraderBrain error (non-fatal):", e.message);
       }
     }
 
     global.researchData.lastUpdate = new Date().toISOString();
-    console.log("Research done in " + (Date.now() - start) + "ms | news=" + newsData.length);
+    console.log("[Research] Done in " + (Date.now() - start) + "ms" +
+      " | news=" + newsData.length +
+      " | watchlist=" + (global.researchData.enrichedWatchlist || []).length +
+      " | calls="     + ((global.researchData.tradeCalls || {}).calls || []).length);
 
   } catch (e) {
-    console.error("Research refresh error:", e.message);
+    console.error("[Research] Unexpected error:", e.message);
   } finally {
     global.researchData.isRefreshing = false;
   }
 }
 
 function startResearchEngine() {
-  console.log("Research engine started — refreshing every 5 min");
+  console.log("[Research] Engine started — refreshing every 5 min");
   refreshResearch(); // immediate first run
   setInterval(refreshResearch, REFRESH_INTERVAL_MS);
 }

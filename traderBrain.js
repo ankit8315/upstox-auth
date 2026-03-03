@@ -3,6 +3,12 @@
 // Every 5 min during market hours: re-evaluates ALL positions + ideas
 // Produces: exact entry price, exact SL, exact targets, quantity, P&L projection
 // Capital: ₹1,00,000 | Risk per trade: ₹500 | Max 3 concurrent positions
+//
+// FIX: tradeCallsCache.calls was initialised as [] (array) but the result object
+//      is { calls:[], traderMindset, ... }. The cache-hit check
+//      `tradeCallsCache.calls.length > 0` always failed because .calls on an
+//      array is undefined. Fixed by initialising cache correctly and normalising
+//      the empty-result path to always return an object, never a bare [].
 
 const axios = require("axios");
 
@@ -13,10 +19,15 @@ const MAX_POSITIONS   = 3;
 const MAX_DAILY_LOSS  = 3000; // 3% of capital — hard stop for the day
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
-let tradeCallsCache    = { calls: [], generatedAt: 0 };
-let thesisCheckCache   = { updates: [], checkedAt: 0 };
+// BUG FIX: was { calls: [], generatedAt: 0 } — .calls here was the result
+// object slot, not an array, so .calls.length always threw / returned undefined.
+let tradeCallsCache    = { result: null, generatedAt: 0 };
+let thesisCheckCache   = { updates: null, checkedAt: 0 };
 const CALL_TTL_MS      = 5 * 60 * 1000;
 const THESIS_TTL_MS    = 5 * 60 * 1000;
+
+// Empty result object — returned instead of [] so callers always get .calls
+const EMPTY_RESULT = { calls: [], traderMindset: "", marketRead: {}, capitalPlan: {}, skipList: [], checklist: [] };
 
 function getProvider() {
   if (process.env.ANTHROPIC_API_KEY) return "anthropic";
@@ -350,14 +361,22 @@ Respond ONLY in valid JSON:
 
 async function generateTradeCalls(enrichedStocks, marketContext, openPositions, todayPnL) {
   const now = Date.now();
-  if (tradeCallsCache.calls.length > 0 && now - tradeCallsCache.generatedAt < CALL_TTL_MS) {
-    return tradeCallsCache.calls;
+
+  // BUG FIX: cache hit check now checks tradeCallsCache.result (an object) not
+  // tradeCallsCache.calls (which was undefined, so .length always threw/was falsy)
+  const cached = tradeCallsCache.result;
+  if (cached && cached.calls && cached.calls.length > 0 && now - tradeCallsCache.generatedAt < CALL_TTL_MS) {
+    console.log("[TraderBrain] Returning cached calls (" + cached.calls.length + ")");
+    return cached;
   }
 
-  if (!enrichedStocks || enrichedStocks.length === 0) return [];
+  if (!enrichedStocks || enrichedStocks.length === 0) {
+    console.warn("[TraderBrain] No enriched stocks — skipping");
+    return EMPTY_RESULT;
+  }
 
   const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-  console.log("TraderBrain: generating trade calls at " + ist);
+  console.log("[TraderBrain] Generating trade calls at " + ist);
 
   try {
     const prompt  = buildTradeCallPrompt(enrichedStocks, marketContext, openPositions, todayPnL || 0, ist);
@@ -400,30 +419,34 @@ async function generateTradeCalls(enrichedStocks, marketContext, openPositions, 
 
     const result = {
       calls:           verified,
-      traderMindset:   parsed.traderMindset,
-      marketRead:      parsed.marketRead,
-      capitalPlan:     parsed.capitalPlan,
-      skipList:        parsed.skipList || [],
+      traderMindset:   parsed.traderMindset   || "",
+      marketRead:      parsed.marketRead       || {},
+      capitalPlan:     parsed.capitalPlan      || {},
+      skipList:        parsed.skipList         || [],
       checklist:       parsed.intraday5MinChecklist || [],
       generatedAt:     parsed.timestamp
     };
 
-    tradeCallsCache = { calls: result, generatedAt: now };
-    console.log("TraderBrain: " + verified.length + " trade calls | mindset: " + (parsed.traderMindset || "").slice(0, 60));
+    // BUG FIX: store in .result not .calls
+    tradeCallsCache = { result, generatedAt: now };
+    console.log("[TraderBrain] " + verified.length + " calls | mindset: " + (parsed.traderMindset || "").slice(0, 60));
     return result;
 
   } catch (e) {
-    console.error("TraderBrain error:", e.message);
-    return tradeCallsCache.calls || { calls: [], traderMindset: "Error generating calls", marketRead: {} };
+    console.error("[TraderBrain] Error:", e.message);
+    // BUG FIX: return the cached result object (not []) so callers always get .calls
+    return tradeCallsCache.result || EMPTY_RESULT;
   }
 }
 
 async function checkTheses(activeCalls, currentPrices, marketContext) {
   const now = Date.now();
-  if (now - thesisCheckCache.checkedAt < THESIS_TTL_MS) return thesisCheckCache.updates;
+  if (now - thesisCheckCache.checkedAt < THESIS_TTL_MS && thesisCheckCache.updates) {
+    return thesisCheckCache.updates;
+  }
   if (!activeCalls || activeCalls.length === 0) return { reviews: [] };
 
-  console.log("TraderBrain: 5-min thesis check for " + activeCalls.length + " calls");
+  console.log("[TraderBrain] 5-min thesis check for " + activeCalls.length + " calls");
 
   try {
     const ist    = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
@@ -433,19 +456,19 @@ async function checkTheses(activeCalls, currentPrices, marketContext) {
     const parsed = JSON.parse(clean);
 
     thesisCheckCache = { updates: parsed, checkedAt: now };
-    console.log("Thesis check done: " + (parsed.reviews || []).length + " reviews");
+    console.log("[TraderBrain] Thesis check done: " + (parsed.reviews || []).length + " reviews");
     return parsed;
 
   } catch (e) {
-    console.error("Thesis check error:", e.message);
+    console.error("[TraderBrain] Thesis check error:", e.message);
     return { reviews: [] };
   }
 }
 
 // Invalidate cache when market context changes significantly
 function invalidateCache() {
-  tradeCallsCache.generatedAt = 0;
-  thesisCheckCache.checkedAt  = 0;
+  tradeCallsCache   = { result: null, generatedAt: 0 };
+  thesisCheckCache  = { updates: null, checkedAt: 0 };
 }
 
 module.exports = { generateTradeCalls, checkTheses, calcPosition, invalidateCache };
