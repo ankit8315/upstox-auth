@@ -14,24 +14,9 @@ const { fetchSectors }        = require("./sectorService");
 const { generateResearch }    = require("./aiResearcher");
 const { enrichWatchlist }     = require("./stockIntelligence");
 const { generateTradeCalls, checkTheses } = require("./traderBrain");
+const { getFallbackWatchlist } = require("./fnoRegistry");
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-
-// ── Fallback watchlist ─────────────────────────────────────────────────────────
-// Used when AI hasn't responded yet or news is thin.
-// Always gives the Watchlist tab something to show.
-const FALLBACK_WATCHLIST = [
-  { symbol: "RELIANCE",   companyName: "Reliance Industries", sector: "Energy",  tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-  { symbol: "HDFCBANK",   companyName: "HDFC Bank",           sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-  { symbol: "INFY",       companyName: "Infosys",             sector: "IT",      tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-  { symbol: "ICICIBANK",  companyName: "ICICI Bank",          sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-  { symbol: "TCS",        companyName: "TCS",                 sector: "IT",      tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-  { symbol: "SBIN",       companyName: "State Bank of India", sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-  { symbol: "TATAMOTORS", companyName: "Tata Motors",         sector: "Auto",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-  { symbol: "BAJFINANCE", companyName: "Bajaj Finance",       sector: "Finance", tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-  { symbol: "AXISBANK",   companyName: "Axis Bank",           sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-  { symbol: "KOTAKBANK",  companyName: "Kotak Bank",          sector: "Bank",    tradeType: "MOMENTUM", direction: "LONG", confidence: 5, thesis: "Top F&O liquid stock — monitoring for momentum" },
-];
 
 // Global research state
 global.researchData = {
@@ -125,11 +110,12 @@ async function refreshResearch() {
       ? global.researchData.aiReport.watchlist
       : null;
 
-    const watchlistToEnrich = aiWatchlist || FALLBACK_WATCHLIST;
-    const usingFallback     = !aiWatchlist;
+    const usingFallback = !aiWatchlist;
+    const dynamicFallback = usingFallback ? await getFallbackWatchlist() : null;
+    const watchlistToEnrich = aiWatchlist || dynamicFallback;
 
     if (usingFallback) {
-      console.log("[Research] Using fallback watchlist (" + FALLBACK_WATCHLIST.length + " F&O stocks)");
+      console.log("[Research] Using fallback watchlist (" + (dynamicFallback || []).length + " F&O stocks from NSE)");
     }
 
     // ── Step 4: Enrich watchlist with live NSE data ───────────────────────────
