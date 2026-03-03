@@ -121,124 +121,168 @@ function calcPosition(entryPrice, stopLoss, capital, openPositions) {
 // A real trader writes tomorrow's plan at night: specific entries, levels, WHY.
 // This runs when market is closed so the app always shows actionable ideas.
 function buildOvernightTradePrompt(enrichedStocks, aiReport, ist) {
-  const watchlistText = enrichedStocks.slice(0, 12).map((s, i) => {
+  // Build the stock list — use AI-generated thesis and causal reasoning as the primary input.
+  // If live price data is available (market hours), include it. If not, the AI uses its own
+  // knowledge of approximate price levels — it knows NSE stocks well enough to give real levels.
+  const stocksText = enrichedStocks.slice(0, 15).map((s, i) => {
     const ld = s.liveData || {};
+    const hasPrice = ld.ltp && ld.ltp > 0;
+
+    const priceSection = hasPrice
+      ? `Last close: ₹${ld.ltp || ld.prevClose}
+   52W: High ₹${ld.high52} Low ₹${ld.low52} | In range: ${(ld.pos52wPct||0).toFixed(0)}%
+   Day range: ₹${ld.dayLow} – ₹${ld.dayHigh} | VWAP: ₹${ld.vwap || "n/a"}
+   Support: S1=₹${(ld.support||{}).s1} S2=₹${(ld.support||{}).s2}
+   Resistance: R1=₹${(ld.resistance||{}).r1} R2=₹${(ld.resistance||{}).r2}
+   Change today: ${(ld.changePct||0).toFixed(2)}% | Volume: ${ld.volumeLakh||"?"}L`
+      : `[Market closed — use your knowledge of this stock's recent price levels]`;
+
     return `
-${i+1}. ${s.symbol} [Conviction: ${s.conviction}/100 | ${s.trafficLight}]
-   Last close: ₹${ld.ltp || ld.prevClose || "?"}
-   52W: High ₹${ld.high52 || "?"} Low ₹${ld.low52 || "?"} | Range position: ${(ld.pos52wPct || 0).toFixed(0)}%
-   Support: S1=₹${(ld.support || {}).s1 || "?"} | Resistance: R1=₹${(ld.resistance || {}).r1 || "?"}
-   Delivery%: ${(s.deliveryData || {}).deliveryPct || "?"}% | PCR: ${((s.oiData || {}).pcr || 0).toFixed(2)}
-   Volume trend: ${(s.volumeData || {}).volumeLabel || "?"}
-   AI Thesis: ${s.thesis || ""}
-   Causal chain: ${s.causalReasoning || ""}
-   Signals: ${(s.signals || []).map(sg => sg.label).join(", ") || "none"}`;
+${i+1}. ${s.symbol} — ${s.companyName || s.symbol} (${s.sector || "?"})
+   Conviction: ${s.conviction||50}/100 | Signal: ${s.trafficLight||"AMBER"}
+   ${priceSection}
+   WHY THIS STOCK: ${s.thesis || ""}
+   CAUSAL CHAIN: ${s.causalReasoning || ""}
+   NEWS LINK: ${s.newsLink || ""}
+   CATALYSTS: ${(s.catalysts||[]).join(", ") || ""}
+   TRADE TYPE: ${s.tradeType || ""} | DIRECTION: ${s.direction || "LONG"}
+   INVALIDATE IF: ${s.invalidateIf || s.watchIfNewsChanges || ""}`;
   }).join("\n");
 
-  const outlook = aiReport && aiReport.marketOutlook ? aiReport.marketOutlook : {};
-  const premarketBriefing = aiReport && aiReport.premarketBriefing ? aiReport.premarketBriefing : {};
+  const outlook = (aiReport && aiReport.marketOutlook) || {};
+  const chains  = (aiReport && aiReport.causalChains)  || [];
+  const sectors = (aiReport && aiReport.sectorPlaybook) || {};
+  const fii     = (aiReport && aiReport.fiiDiiPlaybook) || {};
+  const alerts  = (aiReport && aiReport.dynamicAlerts)  || [];
+  const premarket = (aiReport && aiReport.premarketBriefing) || {};
 
-  return `You are a profitable NSE intraday trader. It is ${ist} IST — market is CLOSED.
-You are writing your trading plan for TOMORROW.
+  const chainsText = chains.slice(0, 6).map(c =>
+    `• ${c.triggerCategory}: ${c.chain}\n  → Stocks: ${(c.impactedStocks||[]).map(s=>s.symbol+" ("+s.direction+")").join(", ")}`
+  ).join("\n");
 
-TOMORROW'S MARKET OUTLOOK (from research):
-Bias: ${outlook.bias || "unknown"} | Confidence: ${outlook.confidence || "?"}/10
-Opening expectation: ${outlook.openingExpectation || "unknown"}
-Summary: ${outlook.summary || "unavailable"}
-First trade idea: ${premarketBriefing.firstTrade || "not available"}
+  return `You are a profitable NSE intraday trader with 10 years experience. It is ${ist} IST — market is CLOSED.
+You are writing tomorrow's COMPLETE trading plan with EXACT price levels.
 
-CAPITAL: ₹1,00,000 | Risk per trade: ₹500 | Max 3 trades | Max loss/day: ₹3,000
+IMPORTANT: If live price data shows "?" it means market is closed. Use your own knowledge of 
+approximate current NSE price levels for these stocks. You know RELIANCE trades ~₹1200, HDFCBANK ~₹1700, 
+INFY ~₹1800, TCS ~₹4000, SBIN ~₹800, etc. Use realistic current levels — don't write 0 or "?" in your output.
 
-WATCHLIST STOCKS WITH DATA:
-${watchlistText}
+━━━ TOMORROW'S MARKET OUTLOOK ━━━
+Bias: ${outlook.bias || "unknown"} | Confidence: ${outlook.confidence||"?"}/10
+Opening: ${outlook.openingExpectation || "unknown"}
+Expected Nifty range: ${outlook.expectedNiftyRange || "use your knowledge"}
+Summary: ${outlook.summary || ""}
+First 15-min strategy: ${premarket.watchInFirstHour || ""}
+Don't chase: ${premarket.dontChase || ""}
 
-YOUR TASK: Write tomorrow's complete trading plan.
-Think through each stock like you're sitting at your terminal at 9pm:
-- What price do I want to buy tomorrow morning?
-- What's my stop loss level (below what structure)?
-- Where do I take profit 1 and profit 2?
-- What's the exact sequence — do I buy at open, or wait for first 15-min candle close?
-- What would make me NOT take this trade (invalidation)?
+━━━ KEY CAUSAL CHAINS (news → stocks) ━━━
+${chainsText || "No chains — reason from sector data and your market knowledge"}
 
-POSITION MATH RULES (I will verify):
+━━━ SECTOR PLAYBOOK ━━━
+Strong BUY sectors: ${(sectors.strongBuy||[]).map(s=>s.sector+" ("+s.reason+")").join(", ") || "unknown"}
+Avoid sectors: ${(sectors.avoidSectors||[]).join(", ") || "none"}
+Rotation theme: ${sectors.rotationTheme || ""}
+
+━━━ FII/DII INTELLIGENCE ━━━
+${fii.interpretation || "No FII data"}
+Follow the money: ${(fii.followTheMoney||[]).join(", ") || ""}
+
+━━━ CANDIDATE STOCKS ━━━
+${stocksText}
+
+━━━ INTRADAY ALERTS TO SET UP FOR TOMORROW ━━━
+${alerts.slice(0,4).map(a=>`• Watch: ${a.watchFor} → ${a.ifHappens}`).join("\n") || "none"}
+
+━━━ CAPITAL ━━━
+₹1,00,000 total | ₹500 risk per trade | Max 3 trades | Max daily loss ₹3,000
+
+━━━ YOUR TASK ━━━
+For each viable stock above, provide a COMPLETE trading plan with REAL price numbers.
+Think like a trader sitting at 9pm writing tomorrow's gameplan:
+
+1. What is the approximate current price of this stock?
+2. Where exactly do I enter? (specific rupee amount, not a range)
+3. Where is my stop loss? (below what structural level — day low, support, VWAP)
+4. What are my 2 targets? (specific levels, not percentages)
+5. When exactly do I enter — at open? after first 15-min candle? on a pullback?
+6. What one thing would make me skip this trade at 9:15am?
+
+POSITION MATH (I will verify each number):
 - Qty = floor(500 / (entryPrice - stopLoss))
-- Deployed = qty × entryPrice (max ₹30,000 per stock)
-- Risk = qty × (entry - stopLoss) ≤ ₹500
+- Deployed = qty × entryPrice (cap at ₹30,000 per trade)
+- Risk = qty × (entry - SL) must be ≤ ₹500
 
-URGENCY FOR TOMORROW:
-- AT_OPEN: buy first candle if it opens at this level
-- FIRST_15MIN_BREAKOUT: buy only if first 15-min candle breaks above X
-- WAIT_FOR_PULLBACK: stock may gap up — wait for dip before entering
-- WATCH_ONLY: no trade yet, just monitor for setup to develop
-
-Respond ONLY in valid JSON (no markdown):
+Respond ONLY in valid JSON:
 {
   "timestamp": "${new Date().toISOString()}",
   "mode": "OVERNIGHT_PLAN",
-  "traderMindset": "1 sentence — what kind of day tomorrow looks like and your approach",
+  "traderMindset": "1 punchy sentence — what kind of day tomorrow is and your overall approach",
   "marketRead": {
     "niftyBias":       "BULL | BEAR | SIDEWAYS",
     "sessionPhase":    "PRE_MARKET",
-    "tradingAdvice":   "1 line — how aggressive to be tomorrow at open",
-    "openingStrategy": "what to do in first 15 minutes",
-    "avoidIf":         "condition that would make you not trade tomorrow at all"
+    "tradingAdvice":   "1 line — aggressive / selective / defensive tomorrow",
+    "openingStrategy": "exactly what to do in first 15 min — e.g. wait for Nifty to confirm direction, then enter",
+    "avoidIf":         "the one condition that makes you sit on hands all day"
   },
   "tradeCalls": [
     {
-      "rank":        1,
-      "symbol":      "EXACT_NSE_SYMBOL",
-      "action":      "BUY | SHORT",
-      "urgency":     "AT_OPEN | FIRST_15MIN_BREAKOUT | WAIT_FOR_PULLBACK | WATCH_ONLY",
-      "grade":       "A+ | A | B",
-      "entryType":   "FIRST_15MIN_BREAKOUT | GAP_AND_GO | SUPPORT_BUY | VWAP_RECLAIM | NEWS_CATALYST",
-      "entryPrice":  0,
-      "entryNote":   "exactly when and how to enter — e.g. Buy above ₹X if first 15-min candle closes green with volume",
-      "stopLoss":    0,
-      "slNote":      "what this SL level represents structurally",
-      "target1":     0,
-      "target2":     0,
-      "t1Note":      "why this target — what level it represents",
-      "trailSlAfterT1": 0,
-      "quantity":    0,
-      "deployed":    0,
-      "riskAmount":  0,
-      "rewardT1":    0,
-      "rewardT2":    0,
-      "rrRatio":     "1:X",
-      "holdTime":    "15-30 min | 30-60 min | 1-2 hours | full day",
-      "exitBy":      "e.g. 11:00 AM | 1:00 PM",
-      "whyNow":      "3-4 sentences — specific data and reasoning for this stock tomorrow",
-      "thesis":      "if X happens this stock does Y because Z",
-      "invalidateIf":"exact condition — if this happens at open, skip the trade",
-      "confidence":  80,
-      "risks":       ["risk 1", "risk 2"]
+      "rank":           1,
+      "symbol":         "EXACT_NSE_SYMBOL",
+      "action":         "BUY | SHORT",
+      "urgency":        "AT_OPEN | FIRST_15MIN_BREAKOUT | WAIT_FOR_PULLBACK | WATCH_ONLY",
+      "grade":          "A+ | A | B",
+      "entryType":      "FIRST_15MIN_BREAKOUT | GAP_AND_GO | SUPPORT_BUY | VWAP_RECLAIM | NEWS_CATALYST",
+      "entryPrice":     1234.50,
+      "entryNote":      "Buy above ₹X only if first 15-min candle closes green with volume above 5L",
+      "stopLoss":       1210.00,
+      "slNote":         "Below today's day low ₹1208 — thesis dead if this breaks",
+      "target1":        1265.00,
+      "t1Note":         "Previous resistance / gap fill level",
+      "target2":        1290.00,
+      "t2Note":         "52W high area — only if Nifty stays green",
+      "trailSlAfterT1": 1234.50,
+      "quantity":       20,
+      "deployed":       24690.00,
+      "riskAmount":     490.00,
+      "rewardT1":       610.00,
+      "rewardT2":       1110.00,
+      "rrRatio":        "1:2.5",
+      "holdTime":       "30-60 min",
+      "exitBy":         "12:00 PM",
+      "whyNow":         "3-4 sentences: specific news/data → why this stock moves tomorrow → what the setup looks like",
+      "thesis":         "If Nifty opens green and holds 22,400, this stock breaks above ₹X resistance because Y catalyst",
+      "invalidateIf":   "If stock opens below ₹Z or Nifty gaps down more than 0.5%, skip entirely",
+      "newsLink":       "which specific headline is driving this",
+      "confidence":     82,
+      "risks":          ["specific risk 1", "specific risk 2"]
     }
   ],
   "capitalPlan": {
-    "tradesPlanned":    2,
-    "totalDeployed":    40000,
-    "totalRisk":        1000,
-    "bestCaseProfit":   3000,
-    "worstCaseLoss":    1000,
-    "adviceIfAllHit":   "what to do if targets hit before noon",
-    "adviceIfAllStop":  "what to do if stop losses hit in morning"
+    "tradesPlanned":   2,
+    "totalDeployed":   45000,
+    "totalRisk":       1000,
+    "bestCaseProfit":  3500,
+    "worstCaseLoss":   1000,
+    "adviceIfAllHit":  "Book T1, trail SL to entry on remaining, log off before 1pm",
+    "adviceIfAllStop": "Stop trading for the day, review setup quality"
   },
   "skipList": [
-    { "symbol": "SYMBOL", "reason": "why avoiding tomorrow specifically" }
+    { "symbol": "SYMBOL", "reason": "why skipping tomorrow — specific reason" }
   ],
   "intraday5MinChecklist": [
-    "What to check at 9:15am open",
-    "What to check after first 15 min candle closes",
-    "What Nifty level to watch as confirmation"
+    "9:15 — Check Nifty opening candle direction",
+    "9:30 — First 15-min candle closed? Confirm breakout before entering",
+    "Every 15 min — Is Nifty still holding above/below key level?"
   ]
 }
 
 RULES:
-1. Only real NSE symbols.
-2. Every trade must have a clear causal reason tied to news or data.
-3. invalidateIf is critical — define the exact condition that makes you skip.
-4. Be specific about price levels. Use the 52W data and support/resistance provided.
-5. If no good setup exists for tomorrow, say 0 calls and explain why.`;
+1. Every entryPrice, stopLoss, target1, target2 MUST be a real number — no 0s, no nulls.
+2. Use your knowledge of current NSE price levels if live data shows "?".
+3. quantity, deployed, riskAmount MUST follow the math formula exactly.
+4. Only include stocks where you genuinely see an edge — 2-4 quality calls beats 8 vague ones.
+5. whyNow must reference specific news or data, not generic statements.
+6. invalidateIf must be specific — a price level or a market condition, not "if market falls".`;
 }
 
 // ── BUILD PROMPT: generate fresh trade calls ──────────────────────────────────

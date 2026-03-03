@@ -116,44 +116,75 @@ async function refreshResearch() {
       console.error("[Research] AI research error (non-fatal):", e.message);
     }
 
-    // ── Step 3: Decide which watchlist to enrich ──────────────────────────────
-    // Priority: AI watchlist → fallback F&O list
-    // This guarantees enrichedWatchlist is NEVER empty after the first run.
+    // ── Step 3 & 4: Build enriched watchlist ─────────────────────────────────
+    // OVERNIGHT / PRE-MARKET: skip live price fetch (Upstox quotes only work during
+    // market hours). Attach the full AI research context to each watchlist item so
+    // traderBrain can reason with news + causal chains + sector data instead of prices.
+    //
+    // INTRADAY: enrich with live Upstox quotes as before.
+
     const aiWatchlist = global.researchData.aiReport &&
                         Array.isArray(global.researchData.aiReport.watchlist) &&
                         global.researchData.aiReport.watchlist.length > 0
       ? global.researchData.aiReport.watchlist
       : null;
 
-    const usingFallback = !aiWatchlist;
-    const dynamicFallback = usingFallback ? await getFallbackWatchlist() : null;
-    const watchlistToEnrich = aiWatchlist || dynamicFallback;
+    const watchlistSource = aiWatchlist || getFallbackWatchlist();
 
-    if (usingFallback) {
-      console.log("[Research] Using fallback watchlist (" + (dynamicFallback || []).length + " F&O stocks from NSE)");
+    if (!aiWatchlist) {
+      console.log("[Research] AI watchlist empty — using built-in F&O fallback (" + watchlistSource.length + " stocks)");
     }
 
-    // ── Step 4: Enrich watchlist with live NSE data ───────────────────────────
-    try {
-      const enriched = await enrichWatchlist(watchlistToEnrich);
-      if (enriched && enriched.length > 0) {
-        global.researchData.enrichedWatchlist = enriched;
-        console.log("[Research] Enriched " + enriched.length + " stocks | Top: " +
-          (enriched[0] || {}).symbol + " conviction=" + (enriched[0] || {}).conviction);
-      } else {
-        // enrichWatchlist returned [] — keep existing enrichedWatchlist if we have it
-        if (global.researchData.enrichedWatchlist.length === 0) {
-          // First run, nothing yet — set minimal stubs so iOS never sees empty
-          global.researchData.enrichedWatchlist = watchlistToEnrich.map(w => ({
-            ...w,
-            signals: [], conviction: (w.confidence || 5) * 8, trafficLight: "AMBER"
+    if (marketPhase === "INTRADAY") {
+      // During market hours: enrich with live Upstox quotes
+      try {
+        const enriched = await enrichWatchlist(watchlistSource);
+        if (enriched && enriched.length > 0) {
+          global.researchData.enrichedWatchlist = enriched;
+          console.log("[Research] Enriched " + enriched.length + " stocks with live data");
+        } else if (global.researchData.enrichedWatchlist.length === 0) {
+          global.researchData.enrichedWatchlist = watchlistSource.map(w => ({
+            ...w, signals: [], conviction: (w.confidence || 5) * 8, trafficLight: "AMBER"
           }));
-          console.warn("[Research] Enrichment returned empty — using stub entries");
         }
+      } catch (e) {
+        console.error("[Research] Enrichment error:", e.message);
       }
-    } catch (e) {
-      console.error("[Research] Enrichment error (non-fatal):", e.message);
-      // On error keep whatever we already have; don't wipe it
+    } else {
+      // OVERNIGHT / PRE-MARKET: attach AI research context to each stock so
+      // traderBrain has causal chains, sector data, and news to reason from.
+      // No live prices needed — AI will use its knowledge of NSE price levels.
+      const aiReport = global.researchData.aiReport || {};
+      const causalMap = {};
+      (aiReport.causalChains || []).forEach(chain => {
+        (chain.impactedStocks || []).forEach(s => {
+          if (!causalMap[s.symbol]) causalMap[s.symbol] = [];
+          causalMap[s.symbol].push({
+            chain:     chain.chain,
+            trigger:   chain.trigger,
+            direction: s.direction,
+            reason:    s.reason,
+            magnitude: s.magnitude
+          });
+        });
+      });
+
+      global.researchData.enrichedWatchlist = watchlistSource.map(w => ({
+        ...w,
+        liveData:     null,   // no live data — AI uses own knowledge
+        oiData:       null,
+        deliveryData: null,
+        volumeData:   null,
+        signals:      [],
+        conviction:   (w.confidence || 5) * 10,
+        trafficLight: (w.confidence || 5) >= 7 ? "GREEN" : (w.confidence || 5) >= 5 ? "AMBER" : "RED",
+        // Attach matching causal chains from AI research
+        causalContext: causalMap[w.symbol] || [],
+        enrichedAt:   new Date().toISOString()
+      }));
+
+      console.log("[Research] Overnight mode: " + global.researchData.enrichedWatchlist.length +
+        " stocks prepared with AI research context (no live prices needed)");
     }
 
     // ── Step 5: TraderBrain — generate exact trade calls ──────────────────────

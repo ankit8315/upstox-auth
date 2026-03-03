@@ -258,14 +258,19 @@ Respond ONLY in this exact JSON (no markdown, no extra text):
 
 RULES:
 1. Use ONLY real NSE-listed symbols. No invented symbols.
-2. Give approximate price levels — you don't have today's exact closing prices, so
-   use your knowledge of recent Indian market levels (Nifty ~22,000–24,000 range, etc.)
-   If news hints at a level, use it. Otherwise give a range.
-3. Every watchlist item MUST trace back to a specific news event or data point.
-4. invalidateIf is CRITICAL — markets reverse fast, always define the exit condition.
-5. Include 8–12 watchlist stocks minimum. Mix ETFs, large-caps, and mid-caps.
-6. If no clear catalyst exists for a stock, don't add it. Quality > quantity.
-7. Think like a trader, not a newsletter writer. Specific. Decisive. Actionable.`;
+2. PRICE LEVELS ARE MANDATORY — you must provide real rupee numbers for entryZone, stopLoss,
+   target1, target2. Use your training knowledge of current NSE prices:
+   Nifty ~22,000–24,000 | RELIANCE ~₹1,200 | HDFCBANK ~₹1,700 | INFY ~₹1,800 | TCS ~₹4,000
+   SBIN ~₹800 | AXISBANK ~₹1,100 | BAJFINANCE ~₹8,500 | TATAMOTORS ~₹750 | LT ~₹3,500
+   ONGC ~₹260 | HAL ~₹4,200 | BEL ~₹280 | ADANIENT ~₹2,300 | ITC ~₹440
+   If news implies a stock moved significantly today, adjust accordingly.
+   NEVER write 0 or null for price levels. Make your best estimate.
+3. entryZone.entryNote must say exactly HOW to enter: "Buy breakout above ₹X on volume" or
+   "Buy dip to support at ₹Y — wait for bounce candle confirmation".
+4. Every watchlist item MUST trace back to a specific news event or data point.
+5. invalidateIf must be a SPECIFIC price level or event, not a vague statement.
+6. Include 8–12 watchlist stocks. Mix: 2-3 index heavyweights, 2-3 sector plays, 1-2 ETFs.
+7. Think like a trader writing tomorrow's gameplan at 9pm. Specific. Decisive. Actionable.`;
 }
 
 // ─── INTRADAY prompt (original deep research — works during market hours) ─────
