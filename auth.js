@@ -154,11 +154,39 @@ app.get("/api/fiidii", (req, res) => {
   res.json(global.researchData.fiidii || {});
 });
 
-// Force refresh research now (useful for testing)
+// Force refresh research now
 app.post("/api/research/refresh", async (req, res) => {
   const { refreshResearch } = require("./researchEngine");
   refreshResearch();
   res.json({ message: "Research refresh triggered" });
+});
+
+// ── TraderBrain endpoints ─────────────────────────────────────────────────────
+
+// GET exact trade calls — the main endpoint for TRADE tab
+app.get("/api/trade-calls", (req, res) => {
+  const rd  = global.researchData;
+  const tc  = rd.tradeCalls || {};
+  res.json({
+    tradeCalls:    tc.calls        || [],
+    traderMindset: tc.traderMindset|| "",
+    marketRead:    tc.marketRead   || {},
+    capitalPlan:   tc.capitalPlan  || {},
+    skipList:      tc.skipList     || [],
+    checklist:     tc.checklist    || [],
+    thesisUpdates: rd.thesisUpdates|| null,
+    generatedAt:   tc.generatedAt  || null,
+    lastUpdate:    rd.lastUpdate
+  });
+});
+
+// Force regenerate trade calls (invalidates cache)
+app.post("/api/trade-calls/refresh", (req, res) => {
+  const { invalidateCache } = require("./traderBrain");
+  invalidateCache();
+  const { refreshResearch } = require("./researchEngine");
+  refreshResearch();
+  res.json({ message: "Trade calls refresh triggered" });
 });
 
 app.get("/", (req, res) => res.json({

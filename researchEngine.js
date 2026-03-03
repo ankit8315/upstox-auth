@@ -7,8 +7,9 @@ const { fetchFIIDII }         = require("./fiiService");
 const { fetchSectors }        = require("./sectorService");
 const { generateResearch }    = require("./aiResearcher");
 const { enrichWatchlist }     = require("./stockIntelligence");
+const { generateTradeCalls, checkTheses } = require("./traderBrain");
 
-const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 min
+const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 // Global research state
 global.researchData = {
@@ -16,7 +17,9 @@ global.researchData = {
   fiidii:           null,
   sectors:          null,
   aiReport:         null,
-  enrichedWatchlist:[],  // watchlist + live NSE data + conviction scores
+  enrichedWatchlist:[],
+  tradeCalls:       null,   // ← AI trader's exact calls with math
+  thesisUpdates:    null,   // ← 5-min re-evaluation
   lastUpdate:       null,
   isRefreshing:     false
 };
@@ -51,12 +54,44 @@ async function refreshResearch() {
         global.researchData.aiReport = aiReport;
 
         // Step 3: Enrich every AI-recommended stock with live NSE data
-        // volume ratio, delivery %, OI, 52w levels, support/resistance, signals
         if (aiReport.watchlist && aiReport.watchlist.length > 0) {
           const enriched = await enrichWatchlist(aiReport.watchlist);
           global.researchData.enrichedWatchlist = enriched;
           console.log("Enriched " + enriched.length + " stocks | Top: " +
             (enriched[0] || {}).symbol + " conviction=" + (enriched[0] || {}).conviction);
+
+          // Step 4: TraderBrain — generate exact trade calls with math
+          // Runs always (pre-market prep + live market calls)
+          try {
+            const openPositions  = require("./riskEngine").getOpenPositions();
+            const todayPnL       = require("./riskEngine").getTodayPnL();
+            const marketContext  = global.niftyContext || null;
+
+            const tradeCalls = await generateTradeCalls(
+              enriched,
+              marketContext,
+              openPositions,
+              todayPnL
+            );
+            global.researchData.tradeCalls = tradeCalls;
+
+            // Step 5: If market is open, also run 5-min thesis check
+            const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+            const h = now.getHours(), m = now.getMinutes(), d = now.getDay();
+            const marketOpen = d >= 1 && d <= 5 && (h > 9 || (h === 9 && m >= 15)) && h < 15;
+
+            if (marketOpen && tradeCalls.calls && tradeCalls.calls.length > 0) {
+              const currentPrices = global.currentPrices || {};
+              const thesisUpdates = await checkTheses(
+                tradeCalls.calls.filter(tc => tc.urgency === "NOW" || tc.enteredAt),
+                currentPrices,
+                marketContext
+              );
+              global.researchData.thesisUpdates = thesisUpdates;
+            }
+          } catch (e) {
+            console.error("TraderBrain integration error:", e.message);
+          }
         }
       }
     }
