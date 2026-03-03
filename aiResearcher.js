@@ -27,67 +27,92 @@ const DEEP_INTRADAY_TTL_MS  = 15 * 60 * 1000;
 const DEEP_OVERNIGHT_TTL_MS = 60 * 60 * 1000;  // overnight report good for 1 hour
 const QUICK_TTL_MS          =  5 * 60 * 1000;
 
-function getProvider() {
-  if (process.env.ANTHROPIC_API_KEY) return "anthropic";
-  if (process.env.OPENAI_API_KEY)    return "openai";
-  if (process.env.GEMINI_API_KEY)    return "gemini";
-  return null;
-}
+// Per-provider rate limit backoff timestamps
+const providerBackoff = { gemini: 0, openai: 0, anthropic: 0 };
 
-let aiRateLimitUntil = 0;
-
+// Try providers in order: Gemini (free/generous) → OpenAI → Anthropic
+// If one hits 429, automatically falls through to the next
 async function callAI(prompt, maxTokens = 4000) {
-  const provider = getProvider();
-  if (!provider) throw new Error("No AI key set in .env (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY)");
+  const now = Date.now();
 
-  // 429 backoff — don't hammer the API after a rate limit
-  if (Date.now() < aiRateLimitUntil) {
-    const sec = Math.round((aiRateLimitUntil - Date.now()) / 1000);
-    throw new Error("Rate limit cooldown — " + sec + "s remaining. Use cached result.");
+  // Build ordered list of available providers, skipping ones in backoff
+  const providers = [];
+  if (process.env.GEMINI_API_KEY    && now > providerBackoff.gemini)    providers.push("gemini");
+  if (process.env.OPENAI_API_KEY    && now > providerBackoff.openai)    providers.push("openai");
+  if (process.env.ANTHROPIC_API_KEY && now > providerBackoff.anthropic) providers.push("anthropic");
+
+  if (providers.length === 0) {
+    // All providers in backoff — report when earliest one recovers
+    const earliest = Math.min(...Object.values(providerBackoff).filter(t => t > 0));
+    const sec = Math.round((earliest - now) / 1000);
+    throw new Error("All AI providers rate-limited. Next retry in " + sec + "s");
   }
 
-  if (provider === "anthropic") {
+  let lastErr = null;
+  for (const provider of providers) {
     try {
-      const r = await axios.post("https://api.anthropic.com/v1/messages", {
-        model:      "claude-haiku-4-5-20251001",
-        max_tokens: maxTokens,
-        messages:   [{ role: "user", content: prompt }]
-      }, {
-        headers: { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-        timeout: 90000
-      });
-      return r.data.content[0].text;
+      console.log("[AI] Trying provider: " + provider);
+      const result = await callProvider(provider, prompt, maxTokens);
+      console.log("[AI] Success via " + provider);
+      return result;
     } catch (err) {
-      if (err.response && err.response.status === 429) {
-        aiRateLimitUntil = Date.now() + 20 * 60 * 1000; // back off 20 min
-        console.warn("[aiResearcher] 429 rate limit — cooling down 20 min");
+      lastErr = err;
+      const status = err.response && err.response.status;
+      if (status === 429 || status === 503) {
+        const backoffMs = 25 * 60 * 1000; // 25 min backoff per provider
+        providerBackoff[provider] = Date.now() + backoffMs;
+        console.warn("[AI] " + provider + " rate limited ("+status+") — backing off 25min, trying next provider");
+      } else {
+        console.warn("[AI] " + provider + " failed (" + (status||err.message) + ") — trying next provider");
       }
-      throw err;
     }
+  }
+  throw lastErr || new Error("All AI providers failed");
+}
+
+async function callProvider(provider, prompt, maxTokens) {
+  if (provider === "gemini") {
+    // Use gemini-1.5-flash (fastest, most generous free quota)
+    const model = "gemini-2.0-flash";
+    const r = await axios.post(
+      "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + process.env.GEMINI_API_KEY,
+      {
+        contents: [{ parts: [{ text: "You are a senior NSE equity research analyst and profitable intraday trader. Respond ONLY in valid JSON, no markdown fences, no extra text.\n\n" + prompt }] }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: maxTokens }
+      },
+      { headers: { "Content-Type": "application/json" }, timeout: 90000 }
+    );
+    const text = r.data.candidates[0].content.parts[0].text;
+    return text;
   }
 
   if (provider === "openai") {
     const r = await axios.post("https://api.openai.com/v1/chat/completions", {
-      model: "gpt-4o", max_tokens: maxTokens, temperature: 0.2,
+      model: "gpt-4o-mini", max_tokens: maxTokens, temperature: 0.3,
       messages: [
-        { role: "system", content: "You are a senior NSE equity research analyst. Always respond in valid JSON only, no markdown fences." },
+        { role: "system", content: "You are a senior NSE equity research analyst and profitable intraday trader. Respond ONLY in valid JSON, no markdown fences, no extra text." },
         { role: "user",   content: prompt }
       ]
     }, {
       headers: { "Authorization": "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" },
-      timeout: 60000
+      timeout: 90000
     });
     return r.data.choices[0].message.content;
   }
 
-  if (provider === "gemini") {
-    const r = await axios.post(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=" + process.env.GEMINI_API_KEY,
-      { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.2, maxOutputTokens: maxTokens } },
-      { headers: { "Content-Type": "application/json" }, timeout: 60000 }
-    );
-    return r.data.candidates[0].content.parts[0].text;
+  if (provider === "anthropic") {
+    const r = await axios.post("https://api.anthropic.com/v1/messages", {
+      model:      "claude-haiku-4-5-20251001",
+      max_tokens: maxTokens,
+      messages:   [{ role: "user", content: prompt }]
+    }, {
+      headers: { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      timeout: 90000
+    });
+    return r.data.content[0].text;
   }
+
+  throw new Error("Unknown provider: " + provider);
 }
 
 // ─── Market hours helper ──────────────────────────────────────────────────────
@@ -168,21 +193,42 @@ Categories to reason through:
 9. DOMESTIC MACRO: RBI, inflation, IIP, GST data → consumption vs infra theme
 10. TECHNICAL SETUP: stocks near 52W high with volume are the best momentum plays
 
-NSE UNIVERSE (use exact symbols):
-- Banks: HDFCBANK, ICICIBANK, SBIN, AXISBANK, KOTAKBANK, IDFCFIRSTB, BANDHANBNK
-- IT: INFY, TCS, WIPRO, HCLTECH, TECHM, LTIM, PERSISTENT, COFORGE
-- Oil/Energy: ONGC, OIL, BPCL, HPCL, IOC, RELIANCE, PETRONET, GAIL
-- Defense: HAL, BEL, BHEL, BEML, MIDHANI, COCHINSHIP, MAZAGON
-- Auto: TATAMOTORS, M&M, MARUTI, BAJAJ-AUTO, HEROMOTOCO, EICHERMOT, TVSMOTOR
-- Pharma: SUNPHARMA, DRREDDY, CIPLA, DIVISLAB, AUROPHARMA, LUPIN
-- FMCG: HINDUNILVR, ITC, NESTLEIND, BRITANNIA, DABUR, GODREJCP
-- Metal: TATASTEEL, JSWSTEEL, HINDALCO, COALINDIA, NMDC, VEDL
-- Realty: DLF, GODREJPROP, PRESTIGE, BRIGADE, OBEROIRLTY, PHOENIXLTD
-- Gold ETFs: GOLDBEES, GOLDIETF, AXISGOLD
-- Silver ETFs: SILVERBEES, SILVRETF
-- Index ETFs: NIFTYBEES, JUNIORBEES, BANKBEES, ITBEES
-- Finance/NBFC: BAJFINANCE, CHOLAFIN, MUTHOOTFIN, MANAPPURAM, LICHSGFIN
-- Chemicals: PIDILITIND, ASIANPAINT, BERGER, KANSAINER, VINATIORGA
+COMPLETE NSE TRADEABLE UNIVERSE — scan ALL sectors, not just index heavyweights:
+
+BANKS & FINANCE: HDFCBANK, ICICIBANK, SBIN, AXISBANK, KOTAKBANK, IDFCFIRSTB, BANDHANBNK, PNB, BANKBARODA, CANBK, UNIONBANK, AUBANK, FEDERALBNK, RBLBANK, KARURVYSYA, BAJFINANCE, BAJAJFINSV, CHOLAFIN, MUTHOOTFIN, MANAPPURAM, SHRIRAMFIN, LICHSGFIN, RECLTD, PFC, IRFC, M&MFIN, HDFCAMC, ICICIGI, ICICIPRULI, SBILIFE, HDFCLIFE, LICI
+
+IT & TECH: INFY, TCS, WIPRO, HCLTECH, TECHM, LTIM, PERSISTENT, COFORGE, MPHASIS, LTTS, OFSS, KPITTECH, TATAELXSI, ZENSARTECH, CYIENT, NEWGEN, MASTEK, BSOFT, RATEGAIN, DIXON, KAYNES, SYRMA
+
+OIL & ENERGY: ONGC, OIL, BPCL, HPCL, IOC, RELIANCE, PETRONET, GAIL, MGL, IGL, GUJGASLTD, ADANIGREEN, ADANIPOWER, TATAPOWER, TORNTPOWER, NTPC, POWERGRID, NHPC, JSWENERGY, SUZLON, SJVN, IREDA, NLCINDIA, CESC
+
+DEFENSE & RAILWAYS: HAL, BEL, BHEL, BEML, MIDHANI, COCHINSHIP, MAZAGON, GRSE, DATAPATTNS, IRCTC, RVNL, IRCON, RITES, TITAGARH, RAILTEL, IRFC
+
+AUTO & EV: TATAMOTORS, M&M, MARUTI, BAJAJ-AUTO, HEROMOTOCO, EICHERMOT, TVSMOTOR, ASHOKLEY, ESCORTS, MRF, CEATLTD, APOLLOTYRE, MOTHERSON, BALKRISIND, TIINDIA, EXIDEIND, AMARAJABAT
+
+PHARMA & HEALTHCARE: SUNPHARMA, DRREDDY, CIPLA, DIVISLAB, AUROPHARMA, LUPIN, BIOCON, GLENMARK, TORNTPHARM, ALKEM, IPCALAB, LAURUSLABS, GRANULES, ZYDUSLIFE, AJANTPHARM, NATCOPHARM
+
+FMCG & RETAIL: HINDUNILVR, ITC, NESTLEIND, BRITANNIA, DABUR, GODREJCP, MARICO, COLPAL, EMAMILTD, TATACONSUM, VBL, RADICO, MCDOWELL-N, TRENT, DMART, ABFRL, BATA, PAGEIND
+
+METAL & MINING: TATASTEEL, JSWSTEEL, HINDALCO, COALINDIA, NMDC, VEDL, HINDZINC, NATIONALUM, SAIL, MOIL, WELCORP, APLAPOLLO, RATNAMANI, JSWHL
+
+INFRA & REALTY: LT, ADANIPORTS, DLF, GODREJPROP, PRESTIGE, BRIGADE, OBEROIRLTY, PHOENIXLTD, SOBHA, LODHA, NCC, HCC, KNRCON, PNCINFRA, GMRINFRA, CONCOR, IRB
+
+CHEMICALS & PAINTS: PIDILITIND, ASIANPAINT, BERGER, KANSAINER, VINATIORGA, DEEPAKNTR, ATUL, NAVINFLUOR, TATACHEM, GNFC, COROMANDEL, CHAMBLFERT, PIIND, AAVAS
+
+CAPITAL GOODS & INDUSTRIALS: SIEMENS, ABB, CUMMINSIND, THERMAX, CGPOWER, BHEL, HAVELLS, POLYCAB, CROMPTON, AMBER, VOLTAS, BOSCH, SKFINDIA
+
+TELECOM & MEDIA: BHARTIARTL, IDEA, TATACOMM, HFCL, RAILTEL, ZEEL, SUNTV, PVRINOX, NYKAA
+
+ETFs (use for sector/macro plays): NIFTYBEES, BANKBEES, ITBEES, JUNIORBEES, GOLDBEES, SILVERBEES, PSUBNKBEES, INFRABEES, PHARMABEES, MAFANG, ICICIB22
+
+IMPORTANT: Do NOT default to only HDFC/ICICI/Reliance/TCS. 
+- If defense news → recommend HAL, BEL, MAZAGON, COCHINSHIP specifically
+- If PSU news → recommend ONGC, COALINDIA, SAIL, NMDC, RECLTD, PFC
+- If railway budget → RVNL, IRCON, TITAGARH, RAILTEL
+- If pharma results → specific pharma stock from news
+- If IT deal win → that specific IT company
+- Look at sector performance: Metal +0.24% today → which metal stocks specifically moved?
+- The best trades are SPECIFIC catalyst-driven moves, not generic index plays
 
 Respond ONLY in this exact JSON (no markdown, no extra text):
 {
@@ -272,21 +318,31 @@ Respond ONLY in this exact JSON (no markdown, no extra text):
   ]
 }
 
-RULES:
-1. Use ONLY real NSE-listed symbols. No invented symbols.
-2. PRICE LEVELS ARE MANDATORY — you must provide real rupee numbers for entryZone, stopLoss,
-   target1, target2. Use your training knowledge of current NSE prices:
-   Nifty ~22,000–24,000 | RELIANCE ~₹1,200 | HDFCBANK ~₹1,700 | INFY ~₹1,800 | TCS ~₹4,000
-   SBIN ~₹800 | AXISBANK ~₹1,100 | BAJFINANCE ~₹8,500 | TATAMOTORS ~₹750 | LT ~₹3,500
-   ONGC ~₹260 | HAL ~₹4,200 | BEL ~₹280 | ADANIENT ~₹2,300 | ITC ~₹440
-   If news implies a stock moved significantly today, adjust accordingly.
-   NEVER write 0 or null for price levels. Make your best estimate.
-3. entryZone.entryNote must say exactly HOW to enter: "Buy breakout above ₹X on volume" or
-   "Buy dip to support at ₹Y — wait for bounce candle confirmation".
-4. Every watchlist item MUST trace back to a specific news event or data point.
-5. invalidateIf must be a SPECIFIC price level or event, not a vague statement.
-6. Include 8–12 watchlist stocks. Mix: 2-3 index heavyweights, 2-3 sector plays, 1-2 ETFs.
-7. Think like a trader writing tomorrow's gameplan at 9pm. Specific. Decisive. Actionable.`;
+CRITICAL RULES — MUST FOLLOW:
+1. REAL NSE SYMBOLS ONLY. No invented symbols.
+
+2. PRICE LEVELS ARE MANDATORY. Use your knowledge of approximate current NSE prices:
+   Nifty ~22,500 | RELIANCE ~₹1,250 | HDFCBANK ~₹1,720 | INFY ~₹1,850 | TCS ~₹3,900
+   SBIN ~₹780 | AXISBANK ~₹1,080 | BAJFINANCE ~₹8,800 | TATAMOTORS ~₹720 | LT ~₹3,600
+   ONGC ~₹265 | HAL ~₹4,300 | BEL ~₹285 | ADANIENT ~₹2,350 | ITC ~₹440 | NTPC ~₹340
+   COALINDIA ~₹420 | TATASTEEL ~₹145 | JSWSTEEL ~₹1,000 | SUNPHARMA ~₹1,750 | DRREDDY ~₹1,200
+   BHARTIARTL ~₹1,700 | DLF ~₹830 | SIEMENS ~₹6,200 | CGPOWER ~₹650 | PVRINOX ~₹1,450
+   NEVER write 0 or null. Make your best estimate based on news context.
+
+3. MANDATORY DIVERSITY — your watchlist MUST span at least 5 different sectors.
+   If today's top sectors were Metal +0.24% and Pharma +0.02% → metal and pharma stocks FIRST.
+   If defense news → HAL/BEL/MAZAGON. If PSU order → BHEL/NCC/L&T. Be sector-specific.
+
+4. 12-15 WATCHLIST STOCKS MINIMUM. Not just Nifty 50 index heavyweights.
+   Include: 2-3 large caps, 3-4 mid caps with catalysts, 1-2 ETFs, 1-2 PSU plays if relevant.
+
+5. EVERY stock must have a SPECIFIC news/data reason. "Looks bullish" is not acceptable.
+   Tie every pick to: a news headline, earnings event, sector move, FII flow, or technical breakout.
+
+6. invalidateIf must be a PRICE LEVEL or EVENT: "If ONGC opens below ₹260" not "if market falls".
+
+7. Think: which stocks had volume today? Which had news? Which sector rotated in?
+   Those are your best overnight plays — not the same old HDFC/ICICI every day.`;
 }
 
 // ─── INTRADAY prompt (original deep research — works during market hours) ─────

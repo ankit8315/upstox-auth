@@ -129,11 +129,16 @@ async function refreshResearch() {
       ? global.researchData.aiReport.watchlist
       : null;
 
-    const watchlistSource = aiWatchlist || getFallbackWatchlist();
-
     if (!aiWatchlist) {
-      console.log("[Research] AI watchlist empty — using built-in F&O fallback (" + watchlistSource.length + " stocks)");
+      // AI hasn't run yet (429 cooldown or first boot) — don't show stale fallback stocks
+      // Just wait. The watchlist will populate once AI completes its first run.
+      console.log("[Research] AI watchlist not ready yet — waiting for AI to complete analysis");
+      global.researchData.enrichedWatchlist = [];
+      global.researchData.lastUpdate = new Date().toISOString();
+      return;
     }
+
+    const watchlistSource = aiWatchlist;
 
     if (marketPhase === "INTRADAY") {
       // During market hours: enrich with live Upstox quotes
