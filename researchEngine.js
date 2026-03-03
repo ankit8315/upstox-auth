@@ -23,7 +23,7 @@ const { refreshAll: refreshNewsEngine, symbolNews } = require("./newsEngine");
 // News spike: immediate re-run triggered by newsEngine if major headline breaks
 const REFRESH_INTERVAL_INTRADAY_MS  = 15 * 60 * 1000;  // 15 min
 const REFRESH_INTERVAL_OVERNIGHT_MS = 60 * 60 * 1000;  // 60 min
-const REFRESH_INTERVAL_MS = 15 * 60 * 1000; // kept for compatibility
+const REFRESH_INTERVAL_MS = 60 * 60 * 1000; // kept for compatibility
 
 // Global research state
 global.researchData = {
