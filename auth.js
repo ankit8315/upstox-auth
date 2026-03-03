@@ -97,17 +97,32 @@ app.get("/api/status", (req, res) => {
 
 // ── Research Routes ───────────────────────────────────────────────────
 
-// Full research bundle (most important — app polls this)
+// Full research bundle
 app.get("/api/research", (req, res) => {
   const rd = global.researchData;
   res.json({
-    lastUpdate:   rd.lastUpdate,
-    isRefreshing: rd.isRefreshing,
-    marketOpen:   isMarketOpen(),
-    aiReport:     rd.aiReport,
-    sectors:      rd.sectors,
-    fiidii:       rd.fiidii,
-    newsCount:    rd.news.length
+    lastUpdate:        rd.lastUpdate,
+    isRefreshing:      rd.isRefreshing,
+    marketOpen:        isMarketOpen(),
+    aiReport:          rd.aiReport,
+    enrichedWatchlist: rd.enrichedWatchlist || [],
+    sectors:           rd.sectors,
+    fiidii:            rd.fiidii,
+    newsCount:         rd.news.length
+  });
+});
+
+// Enriched watchlist only (lighter payload for watchlist tab)
+app.get("/api/watchlist/enriched", (req, res) => {
+  const rd  = global.researchData;
+  const tl  = req.query.trafficLight; // GREEN | AMBER | RED
+  let list  = rd.enrichedWatchlist || [];
+  if (tl) list = list.filter(w => w.trafficLight === tl);
+  res.json({
+    count:         list.length,
+    watchlist:     list,
+    marketOutlook: rd.aiReport ? rd.aiReport.marketOutlook : null,
+    generatedAt:   rd.aiReport ? rd.aiReport.analysisTimestamp : null
   });
 });
 
