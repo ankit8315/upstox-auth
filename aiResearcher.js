@@ -23,9 +23,9 @@ const cache = {
   lastMode:     null    // "OVERNIGHT" | "INTRADAY"
 };
 
-const DEEP_INTRADAY_TTL_MS  = 15 * 60 * 1000;
-const DEEP_OVERNIGHT_TTL_MS = 60 * 60 * 1000;  // overnight report good for 1 hour
-const QUICK_TTL_MS          =  5 * 60 * 1000;
+const DEEP_INTRADAY_TTL_MS  = 14 * 60 * 1000;  // 14 min — always fresh for 15-min cycle
+const DEEP_OVERNIGHT_TTL_MS = 58 * 60 * 1000;  // 58 min — always fresh for 60-min cycle
+const QUICK_TTL_MS          = 14 * 60 * 1000;  // quick updates also 14 min
 
 // Per-provider rate limit backoff timestamps
 const providerBackoff = { gemini: 0, openai: 0, anthropic: 0 };

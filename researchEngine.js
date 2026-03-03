@@ -17,7 +17,13 @@ const { generateTradeCalls, checkTheses } = require("./traderBrain");
 const { getFallbackWatchlist } = require("./fnoRegistry");
 const { refreshAll: refreshNewsEngine, symbolNews } = require("./newsEngine");
 
-const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+// Smart refresh schedule — not a fixed 5-min timer
+// Overnight: runs once per hour (AI does homework, no need to redo every 5 min)
+// Intraday:  runs every 15 min (price action meaningful at that cadence)
+// News spike: immediate re-run triggered by newsEngine if major headline breaks
+const REFRESH_INTERVAL_INTRADAY_MS  = 15 * 60 * 1000;  // 15 min
+const REFRESH_INTERVAL_OVERNIGHT_MS = 60 * 60 * 1000;  // 60 min
+const REFRESH_INTERVAL_MS = 15 * 60 * 1000; // kept for compatibility
 
 // Global research state
 global.researchData = {
@@ -262,9 +268,22 @@ async function refreshResearch() {
 }
 
 function startResearchEngine() {
-  console.log("[Research] Engine started — refreshing every 5 min");
+  console.log("[Research] Engine started — smart schedule: overnight=60min, intraday=15min");
   refreshResearch(); // immediate first run
-  setInterval(refreshResearch, REFRESH_INTERVAL_MS);
+
+  // Smart scheduler — overnight calls AI once per hour, intraday every 15 min
+  // This keeps API calls at ~20/day instead of ~288/day — no more rate limits
+  function scheduleNext() {
+    const phase = require("./aiResearcher").getMarketPhase();
+    const isMarket = (phase === "INTRADAY" || phase === "OPENING");
+    const interval = isMarket ? REFRESH_INTERVAL_INTRADAY_MS : REFRESH_INTERVAL_OVERNIGHT_MS;
+    console.log("[Research] Next refresh in " + Math.round(interval/60000) + "min [" + phase + "]");
+    setTimeout(async () => {
+      await refreshResearch();
+      scheduleNext();
+    }, interval);
+  }
+  scheduleNext();
 }
 
 module.exports = { startResearchEngine, refreshResearch };
