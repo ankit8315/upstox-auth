@@ -133,8 +133,7 @@ ${i+1}. ${s.symbol} [Conviction: ${s.conviction}/100 | ${s.trafficLight}]
    AI Thesis: ${s.thesis || ""}
    Causal chain: ${s.causalReasoning || ""}
    Signals: ${(s.signals || []).map(sg => sg.label).join(", ") || "none"}`;
-  }).join("
-");
+  }).join("\n");
 
   const outlook = aiReport && aiReport.marketOutlook ? aiReport.marketOutlook : {};
   const premarketBriefing = aiReport && aiReport.premarketBriefing ? aiReport.premarketBriefing : {};
