@@ -599,4 +599,4 @@ async function generateResearch(news, fiidii, sectors, upcomingEarnings) {
   return cache.deepReport;
 }
 
-module.exports = { generateResearch, getMarketPhase };
+module.exports = { generateResearch, getMarketPhase, providerBackoff };

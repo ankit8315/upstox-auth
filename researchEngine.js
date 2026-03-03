@@ -130,9 +130,19 @@ async function refreshResearch() {
       : null;
 
     if (!aiWatchlist) {
-      // AI hasn't run yet (429 cooldown or first boot) — don't show stale fallback stocks
-      // Just wait. The watchlist will populate once AI completes its first run.
-      console.log("[Research] AI watchlist not ready yet — waiting for AI to complete analysis");
+      // AI hasn't produced a watchlist yet (429 cooldown or first boot)
+      // Check if all providers are still in backoff — if so, log once and skip
+      const { providerBackoff } = require("./aiResearcher");
+      const now = Date.now();
+      const allBacked = providerBackoff &&
+        Object.values(providerBackoff).every(t => t > now);
+      if (allBacked) {
+        const earliest = Math.min(...Object.values(providerBackoff));
+        const minLeft  = Math.round((earliest - now) / 60000);
+        console.log("[Research] All AI providers in cooldown — retrying in ~" + minLeft + " min. Skipping cycle.");
+      } else {
+        console.log("[Research] AI watchlist not ready yet — waiting for AI to complete analysis");
+      }
       global.researchData.enrichedWatchlist = [];
       global.researchData.lastUpdate = new Date().toISOString();
       return;
