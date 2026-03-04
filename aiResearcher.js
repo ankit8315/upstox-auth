@@ -175,23 +175,57 @@ ${fiiData}
 ${earningsText}
 
 ━━━ YOUR ANALYSIS FRAMEWORK ━━━
-For EVERY significant news event, trace the full causal chain. Example:
-  "RBI holds rates steady → banks not squeezed on margins → HDFCBANK, ICICIBANK, AXISBANK bullish"
-  "Crude oil up $2 → OMC margins squeezed → BPCL, HPCL cautious | but ONGC, OIL India bullish"
-  "US Nasdaq up 1.5% → Indian IT sentiment positive → TCS, INFY gap up at open likely"
-  "FII bought ₹2000 Cr yesterday → index heavyweight buying → HDFC Bank, Reliance, Infosys likely bid"
+You are combining the research depth of Renaissance Technologies, Goldman Sachs, and Bridgewater.
+For every stock you pick, run through ALL of these lenses:
 
-Categories to reason through:
-1. GLOBAL CUES: US markets, SGX Nifty → what gap-up/gap-down is expected tomorrow?
-2. CRUDE OIL: direction → upstream cos, OMCs, aviation, paints, chemicals, tyres
-3. GOLD/SILVER: safe haven demand → GOLDBEES, SILVERBEES, Muthoot, Manappuram
-4. CURRENCY (USD/INR): weaker rupee → IT exports benefit; import cos hurt
-5. FII FLOWS: sustained buying → index heavyweights; selling → broad weakness
-6. EARNINGS tomorrow: beats/misses from peers create sector contagion
-7. SECTOR ROTATION: which sector FII is rotating into based on today's data
-8. GEOPOLITICAL: war/sanctions → defense (HAL, BEL), commodities, energy
-9. DOMESTIC MACRO: RBI, inflation, IIP, GST data → consumption vs infra theme
-10. TECHNICAL SETUP: stocks near 52W high with volume are the best momentum plays
+LENS 1 — CAUSAL CHAIN (news → stock):
+  "RBI holds rates → banks not squeezed → HDFCBANK, ICICIBANK bullish"
+  "Crude up $2 → OMC margins squeezed → BPCL/HPCL cautious, ONGC/OIL bullish"
+  "US Nasdaq +1.5% → Indian IT gap-up → TCS, INFY, HCLTECH bid at open"
+  "FII bought ₹2000Cr → index heavyweights bid → RELIANCE, HDFCBANK, INFY"
+  "Defense order announced → HAL, BEL, MAZAGON, COCHINSHIP spike"
+
+LENS 2 — STATISTICAL EDGE (Renaissance-style):
+  - Day-of-week patterns: Mondays often weak, Fridays see short-covering rallies
+  - Sector rotation: which sectors outperform in current macro cycle?
+  - Pre-earnings run: stocks often run 3-5% in week before results
+  - Post-result contagion: sector peer moves after one company reports
+
+LENS 3 — COMPETITIVE & SECTOR ANALYSIS (Bain/McKinsey-style):
+  - Which company in the sector has best margins and moat?
+  - Is this a sector rotation moment (FII moving from IT to PSU, or defensive to cyclical)?
+  - Who benefits most from today's macro data (IIP, PMI, CPI, GST collections)?
+
+LENS 4 — MACRO IMPACT (Bridgewater-style):
+  - Interest rate environment → growth vs value rotation
+  - INR/USD direction → IT exporters vs import-heavy cos
+  - Global risk-off → safe havens (GOLDBEES, SILVERBEES, pharma, FMCG)
+  - Global risk-on → cyclicals (metal, infra, auto, realty)
+  - RBI policy → banking margins, NBFC liquidity, housing demand
+
+LENS 5 — TECHNICAL SETUP (Citadel-style):
+  - Stocks near 52W high with volume = best momentum plays
+  - Gap-up stocks that held gap = continuation signal
+  - Stocks with high delivery% = institutional accumulation
+  - PCR > 1.2 = put writers confident = bullish
+  - VIX > 17 (current) = elevated fear = prefer defensive or wait for dip entries
+
+LENS 6 — EARNINGS CATALYST (JPMorgan-style):
+  - Which stocks report results this week? Pre-earnings run opportunity?
+  - Recent beats/misses in sector → contagion to peers?
+  - Management guidance from last call — any upgrade/downgrade potential?
+
+CATEGORIES TO SCAN:
+1. GLOBAL CUES: US/Asia markets, SGX Nifty → gap direction
+2. CRUDE OIL: upstream (ONGC,OIL), OMCs (BPCL,HPCL), aviation (INDIGO), paints (ASIANPAINT)
+3. GOLD/SILVER: GOLDBEES, SILVERBEES, MUTHOOTFIN, MANAPPURAM
+4. CURRENCY: INR weak → IT exports (INFY,TCS,WIPRO); INR strong → import cos hurt
+5. FII/DII FLOWS: follow institutional money → which sectors they're accumulating
+6. EARNINGS: pre-run trades, post-result peer contagion
+7. SECTOR ROTATION: metal today → which metal stock specifically?
+8. GEOPOLITICAL: defense orders → HAL,BEL,BHEL,COCHINSHIP,MAZAGON
+9. PSU/GOVT SPEND: infra budget → L&T,NCC,RVNL,IRCON; PSU banks → SBIN,PNB,BANKBARODA
+10. TECHNICAL BREAKOUTS: 52W high approaching + volume surge = highest conviction plays
 
 COMPLETE NSE TRADEABLE UNIVERSE — scan ALL sectors, not just index heavyweights:
 
