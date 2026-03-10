@@ -2,7 +2,7 @@
 // Thinks like a profitable intraday trader with 10 years NSE experience
 // Every 5 min during market hours: re-evaluates ALL positions + ideas
 // Produces: exact entry price, exact SL, exact targets, quantity, P&L projection
-// Capital: ₹1,00,000 | Risk per trade: ₹500 | Max 3 concurrent positions
+// Capital: ₹15,000 | Risk per trade: ₹150 | Max 3 concurrent positions
 //
 // FIX: tradeCallsCache.calls was initialised as [] (array) but the result object
 //      is { calls:[], traderMindset, ... }. The cache-hit check
@@ -14,10 +14,10 @@ const axios = require("axios");
 const { getMarketPhase } = require("./aiResearcher");
 
 // ── Constants matching riskEngine ────────────────────────────────────────────
-const CAPITAL         = 100000;
-const RISK_PER_TRADE  = 500;
+const CAPITAL         = 15000;
+const RISK_PER_TRADE  = 150;
 const MAX_POSITIONS   = 3;
-const MAX_DAILY_LOSS  = 3000; // 3% of capital — hard stop for the day
+const MAX_DAILY_LOSS  = 450;   // 3% of capital — hard stop for the day
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 // BUG FIX: was { calls: [], generatedAt: 0 } — .calls here was the result
@@ -46,7 +46,7 @@ async function callAI(prompt, maxTokens = 3000) {
 
   if (provider === "anthropic") {
     const r = await axios.post("https://api.anthropic.com/v1/messages", {
-      model:      "claude-sonnet-4-20250514",
+      model:      "claude-haiku-4-5-20251001",
       max_tokens: maxTokens,
       messages:   [{ role: "user", content: prompt }]
     }, {
@@ -98,7 +98,7 @@ function calcPosition(entryPrice, stopLoss, capital, openPositions) {
   if (quantity <= 0)  return null;
 
   const totalCost     = quantity * entryPrice;
-  const maxCapPerTrade= capital * 0.30; // max 30% in one stock
+  const maxCapPerTrade= Math.min(capital * 0.33, 5000); // max ₹5000 per trade
 
   const finalQty      = totalCost > maxCapPerTrade
     ? Math.floor(maxCapPerTrade / entryPrice)
@@ -197,7 +197,7 @@ ${stocksText}
 ${alerts.slice(0,4).map(a=>`• Watch: ${a.watchFor} → ${a.ifHappens}`).join("\n") || "none"}
 
 ━━━ CAPITAL ━━━
-₹1,00,000 total | ₹500 risk per trade | Max 3 trades | Max daily loss ₹3,000
+₹15,000 total | ₹150 risk per trade | Max 3 trades | Max daily loss ₹450
 
 ━━━ YOUR TASK ━━━
 For each viable stock above, provide a COMPLETE trading plan with REAL price numbers.
@@ -211,9 +211,9 @@ Think like a trader sitting at 9pm writing tomorrow's gameplan:
 6. What one thing would make me skip this trade at 9:15am?
 
 POSITION MATH (I will verify each number):
-- Qty = floor(500 / (entryPrice - stopLoss))
-- Deployed = qty × entryPrice (cap at ₹30,000 per trade)
-- Risk = qty × (entry - SL) must be ≤ ₹500
+- Qty = floor(150 / (entryPrice - stopLoss))
+- Deployed = qty × entryPrice (cap at ₹5,000 per trade)
+- Risk = qty × (entry - SL) must be ≤ ₹150
 
 Respond ONLY in valid JSON:
 {
@@ -292,7 +292,7 @@ RULES:
 function buildTradeCallPrompt(enrichedStocks, marketContext, openPositions, todayPnL, currentTime) {
   const ist         = currentTime || new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   const openCount   = openPositions ? openPositions.length : 0;
-  const remainCap   = CAPITAL - openCount * 25000; // approx remaining
+  const remainCap   = CAPITAL - openCount * 5000; // approx remaining
   const dailyLossLeft = MAX_DAILY_LOSS + todayPnL; // if pnl is -1000, only 2000 more loss allowed
 
   // Format open positions
@@ -328,16 +328,16 @@ ${i+1}. ${s.symbol} [Conviction: ${s.conviction}/100 | ${s.trafficLight}]
     ? `Nifty: ₹${marketContext.niftyLTP} (${marketContext.niftyChange >= 0 ? "+" : ""}${(marketContext.niftyChange || 0).toFixed(2)}%) | Trend: ${marketContext.niftyTrend}`
     : "Nifty: data unavailable";
 
-  return `You are a profitable NSE intraday trader with 10 years experience. You manage ₹1,00,000 capital.
+  return `You are a profitable NSE intraday trader with 10 years experience. You manage ₹15,000 capital.
 
 CURRENT TIME: ${ist}
 CAPITAL STATUS:
-- Total capital: ₹1,00,000
-- Risk per trade: ₹500 (fixed)
+- Total capital: ₹15,000
+- Risk per trade: ₹150 (fixed)
 - Max positions: 3
 - Open positions: ${openCount}/3
 - Today P&L: ₹${todayPnL >= 0 ? "+" : ""}${todayPnL}
-- Daily loss limit remaining: ₹${dailyLossLeft}
+- Daily loss limit remaining: ₹${Math.max(0, 450 + todayPnL)}
 - Approximate capital available: ₹${remainCap}
 
 OPEN POSITIONS:
@@ -370,9 +370,9 @@ For each viable trade, think through:
    - Trail SL after T1 hit: move SL to entry (risk-free trade)
 
 3. POSITION MATH (I will verify this):
-   - Qty = floor(500 / (entry - stopLoss))
+   - Qty = floor(150 / (entry - stopLoss))
    - Deployed = qty × entry
-   - Must fit in ₹30,000 max per stock
+   - Must fit in ₹5,000 max per stock
 
 4. DISCARD if any of these are true:
    - Stock is already up 3%+ today without a pullback (chasing)
@@ -460,9 +460,9 @@ Respond ONLY in this exact JSON (no markdown, no extra text):
 }
 
 CRITICAL RULES:
-1. Quantity MUST use formula: floor(500 / (entryPrice - stopLoss)). Show real math.
+1. Quantity MUST use formula: floor(150 / (entryPrice - stopLoss)). Show real math.
 2. Deployed MUST equal quantity × entryPrice.
-3. Risk MUST equal quantity × (entryPrice - stopLoss) ≤ ₹500.
+3. Risk MUST equal quantity × (entryPrice - stopLoss) ≤ ₹150.
 4. Only recommend stocks where you genuinely see an edge RIGHT NOW.
 5. If market is bad, say 0 trade calls and explain why in traderMindset.
 6. Grade A+ = take immediately. A = take if setup confirms. B = optional.
