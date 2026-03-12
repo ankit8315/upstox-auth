@@ -6,7 +6,6 @@ const { startPoller }          = require("./poller");
 const { executeBuy }           = require("./orderManager");
 const { startResearchEngine }  = require("./researchEngine");
 const { getOpenPositions, getAllPositions, getTodayPnL } = require("./riskEngine");
-const { getPreBreakoutCandidates } = require("./preBreakoutEngine");
 
 const app         = express();
 const PORT        = process.env.PORT || 3000;
@@ -24,18 +23,6 @@ if (!accessToken) { console.error("UPSTOX_ACCESS_TOKEN missing"); process.exit(1
 // ── In-memory stores ──────────────────────────────────────────────────
 const breakouts = [];
 const trades    = [];
-
-// Add global store
-global.preBreakouts = [];
-global.addPreBreakout = (alert) => {
-  global.preBreakouts.unshift(alert);
-  if (global.preBreakouts.length > 50) global.preBreakouts.pop();
-};
-
-// Add API endpoint
-app.get("/pre-breakouts", (req, res) => {
-  res.json({ alerts: global.preBreakouts || [] });
-});
 
 global.addBreakout = (data) => {
   const recent = breakouts.find(b => b.symbol === data.symbol && Date.now() - new Date(b.time).getTime() < 120000);
@@ -139,6 +126,34 @@ app.get("/api/watchlist/enriched", (req, res) => {
   });
 });
 
+// Pre-breakout candidates (fires BEFORE 5%+ move)
+app.get("/api/pre-breakouts", (req, res) => {
+  try {
+    const { getPreBreakoutCandidates } = require("./preBreakoutEngine");
+    const candidates = getPreBreakoutCandidates();
+    // Enrich with current prices and format for iOS
+    const alerts = candidates.map(c => {
+      const ltp = (global.currentPrices || {})[c.symbol] ||
+                  (global.currentPrices || {})["NSE_EQ|" + c.symbol] || 0;
+      return {
+        symbol:   c.symbol,
+        price:    ltp,
+        type:     c.type     || null,
+        emoji:    c.emoji    || null,
+        msg:      c.msg      || null,
+        sector:   c.sector   || null,
+        change:   c.change   || null,
+        priority: c.priority || 50,
+        time:     new Date(c.alertedAt || Date.now()).toISOString()
+      };
+    }).filter(a => a.price > 0);
+
+    res.json({ count: alerts.length, alerts, updatedAt: new Date().toISOString() });
+  } catch (e) {
+    res.json({ count: 0, alerts: [], updatedAt: new Date().toISOString() });
+  }
+});
+
 // News with optional category filter
 app.get("/api/news", (req, res) => {
   const category = req.query.category;
@@ -208,90 +223,6 @@ app.get("/", (req, res) => res.json({
   researchReady: !!global.researchData.aiReport,
   marketOpen: isMarketOpen()
 }));
-
-// ── Upstox Token Auto-Refresh ─────────────────────────────────────────────────
-// Step 1: Visit http://YOUR_SERVER:3000/auth/login → redirects to Upstox login
-// Step 2: Upstox redirects back with code → server auto-saves token to .env
-// You only need to visit /auth/login once per day (bookmark it on phone)
-
-const fs   = require("fs");
-const path = require("path");
-
-const UPSTOX_CLIENT_ID     = process.env.UPSTOX_CLIENT_ID     || "";
-const UPSTOX_CLIENT_SECRET = process.env.UPSTOX_CLIENT_SECRET || "";
-const UPSTOX_REDIRECT_URI  = process.env.UPSTOX_REDIRECT_URI  || "http://" + (process.env.SERVER_IP || "34.132.17.241") + ":3000/auth/callback";
-
-app.get("/auth/login", (req, res) => {
-  if (!UPSTOX_CLIENT_ID) {
-    return res.send("Add UPSTOX_CLIENT_ID and UPSTOX_CLIENT_SECRET to .env first.<br>Get them from https://developer.upstox.com");
-  }
-  const url = "https://api.upstox.com/v2/login/authorization/dialog" +
-    "?response_type=code" +
-    "&client_id=" + UPSTOX_CLIENT_ID +
-    "&redirect_uri=" + encodeURIComponent(UPSTOX_REDIRECT_URI);
-  res.redirect(url);
-});
-
-app.get("/auth/callback", async (req, res) => {
-  const code = req.query.code;
-  if (!code) return res.status(400).send("No auth code received from Upstox");
-
-  try {
-    const axios = require("axios");
-    const resp  = await axios.post("https://api.upstox.com/v2/login/authorization/token", {
-      code,
-      client_id:     UPSTOX_CLIENT_ID,
-      client_secret: UPSTOX_CLIENT_SECRET,
-      redirect_uri:  UPSTOX_REDIRECT_URI,
-      grant_type:    "authorization_code"
-    }, { headers: { "Content-Type": "application/x-www-form-urlencoded" } });
-
-    const newToken = resp.data.access_token;
-    if (!newToken) throw new Error("No access_token in response");
-
-    // Update .env file with new token
-    const envPath = path.join(__dirname, ".env");
-    let envContent = fs.readFileSync(envPath, "utf8");
-    if (envContent.includes("UPSTOX_ACCESS_TOKEN=")) {
-      envContent = envContent.replace(/UPSTOX_ACCESS_TOKEN=.*/,  "UPSTOX_ACCESS_TOKEN=" + newToken);
-    } else {
-      envContent += "\nUPSTOX_ACCESS_TOKEN=" + newToken;
-    }
-    fs.writeFileSync(envPath, envContent);
-
-    // Hot-reload the token — no restart needed
-    process.env.UPSTOX_ACCESS_TOKEN = newToken;
-
-    console.log("[Auth] Upstox token refreshed successfully at " +
-      new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + " IST");
-
-    res.send(`
-      <html><body style="font-family:monospace;background:#0a0a0a;color:#00ff88;padding:40px">
-        <h2>✅ Upstox Token Refreshed!</h2>
-        <p>New token saved to .env and activated immediately.</p>
-        <p>No server restart needed.</p>
-        <p><b>Bookmark this page on your phone:</b><br>
-        <a style="color:#00ff88" href="/auth/login">http://34.132.17.241:3000/auth/login</a></p>
-        <p>Visit it every morning before 9:15 AM to refresh your token.</p>
-        <script>setTimeout(()=>window.close(),3000)</script>
-      </body></html>
-    `);
-  } catch (e) {
-    console.error("[Auth] Token refresh failed:", e.message);
-    res.status(500).send("Token refresh failed: " + e.message);
-  }
-});
-
-// Token status endpoint — shows if token is valid and when it was last refreshed
-app.get("/auth/status", (req, res) => {
-  const token = process.env.UPSTOX_ACCESS_TOKEN || "";
-  res.json({
-    hasToken:    token.length > 10,
-    tokenPrefix: token.slice(0, 20) + "...",
-    marketOpen:  isMarketOpen(),
-    hint:        isMarketOpen() && !token ? "TOKEN MISSING — visit /auth/login NOW" : "OK"
-  });
-});
 
 // ── Helpers ───────────────────────────────────────────────────────────
 

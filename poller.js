@@ -204,12 +204,15 @@ async function startPoller(accessToken, instrumentKeys) {
           // ltp >= td.high5Min is always true — we need ltp to be a NEW high
           // i.e. ltp > what the high was last poll (stored as td.prevHigh5Min)
           const prevHigh = td.prevHigh5Min || 0;
-          td.prevHigh5Min = td.high5Min; // store for next poll
-          const isNewHigh = prevHigh > 0 && ltp > prevHigh && ltp >= td.high5Min;
-          if (isNewHigh && td.ticks.length >= 3 &&
-              now - (td.lastBreakoutTime || 0) > 90000) {
+          td.prevHigh5Min = td.high5Min;
+          // Require MINIMUM 0.4% move above prev high to filter ₹0.1 noise
+          const minBreakoutPct = 0.004; // 0.4%
+          const pctMove = prevHigh > 0 ? (ltp - prevHigh) / prevHigh : 0;
+          const isRealBreakout = prevHigh > 0 && pctMove >= minBreakoutPct && ltp >= td.high5Min;
+          if (isRealBreakout && td.ticks.length >= 5 &&
+              now - (td.lastBreakoutTime || 0) > 120000) {
             td.lastBreakoutTime = now;
-            console.log("5MIN BREAKOUT: " + key.replace("NSE_EQ|","") + " prev=" + prevHigh.toFixed(2) + " now=" + ltp);
+            console.log("5MIN BREAKOUT: " + key.replace("NSE_EQ|","") + " +" + (pctMove*100).toFixed(2) + "% prev=" + prevHigh.toFixed(2) + " now=" + ltp);
             await processSignal(key, ltp, state, "5min_high", accessToken);
           }
         } catch (e) {}
