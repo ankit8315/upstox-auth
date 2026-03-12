@@ -219,7 +219,7 @@ function updateBaseline(symbol, now, s) {
   }
 }
 
-// ── Send Telegram alert ───────────────────────────────────────────────────────
+// ── Send alert ────────────────────────────────────────────────────────────────
 function sendAlert(symbol, ltp, alert, extraData) {
   const now = Date.now();
   if (now - (alertCooldown[symbol] || 0) < ALERT_COOLDOWN_MS) return;
@@ -232,16 +232,9 @@ function sendAlert(symbol, ltp, alert, extraData) {
     ? "\n📍 " + (((extraData.high52w - ltp) / ltp) * 100).toFixed(1) + "% to 52W high ₹" + extraData.high52w
     : "";
 
-  const msg =
-    alert.emoji + " PRE-BREAKOUT: " + symbol + "\n" +
-    "₹" + ltp + " (" + (chg >= 0 ? "+" : "") + chg + "%) | " + sector + "\n\n" +
-    alert.type + ": " + alert.msg +
-    dist52 + "\n\n" +
-    "⏱ Act before it moves.";
-
   console.log("[preBreakout] " + alert.emoji + " " + symbol + " — " + alert.type);
-  sendTelegramAlert(msg);
 
+  // Store in global for /api/pre-breakouts endpoint
   if (global.addPreBreakout) {
     global.addPreBreakout({
       symbol, price: ltp, type: alert.type,
@@ -249,6 +242,18 @@ function sendAlert(symbol, ltp, alert, extraData) {
       sector, change: parseFloat(chg),
       time: new Date().toISOString(), priority: alert.priority
     });
+  }
+
+  // Only send Telegram for HIGH priority signals (IGNITION or VOLUME_SURGE)
+  // to avoid spamming — regular signals just go to the app
+  if (alert.priority >= 80) {
+    const msg =
+      alert.emoji + " PRE-BREAKOUT: " + symbol + "\n" +
+      "₹" + ltp + " (" + (chg >= 0 ? "+" : "") + chg + "%) | " + sector + "\n\n" +
+      alert.type + ": " + alert.msg +
+      dist52 + "\n\n" +
+      "⏱ Act before it moves.";
+    sendTelegramAlert(msg);
   }
 }
 

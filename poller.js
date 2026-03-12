@@ -13,6 +13,25 @@ const { refreshMarketContext, isSafeToTrade, context, getTopSectors } = require(
 const { refreshAll: refreshNews, getSymbolNewsScore } = require("./newsEngine");
 const { processTick: breakoutEngineTick }            = require("./breakoutEngine");
 
+// ── Telegram rate limiter: max 1 message per 3 seconds ───────────────────────
+const telegramQueue = [];
+let telegramBusy = false;
+const TELEGRAM_INTERVAL_MS = 3000;
+
+function queueTelegram(msg) {
+  telegramQueue.push(msg);
+  if (!telegramBusy) drainTelegramQueue();
+}
+
+async function drainTelegramQueue() {
+  if (telegramQueue.length === 0) { telegramBusy = false; return; }
+  telegramBusy = true;
+  const msg = telegramQueue.shift();
+  try { await sendTelegramAlert(msg); } catch(e) {}
+  setTimeout(drainTelegramQueue, TELEGRAM_INTERVAL_MS);
+}
+global.queueTelegram = queueTelegram;
+
 const POLL_INTERVAL_MS      = 10000;
 const BATCH_SIZE            = 500;
 const DELAY_BETWEEN_BATCHES = 1000;
@@ -143,7 +162,7 @@ async function processSignal(key, ltp, state, type, accessToken) {
   } else {
     msg += "\n⚠️ " + tradeCheck.reason;
   }
-  sendTelegramAlert(msg);
+  sendTelegramAlert(msg);  // already rate-limited by queue via alertService
 
   console.log("SIGNAL: " + key.replace("NSE_EQ|","") + " score=" + scored.score +
     " grade=" + scored.grade + (ai ? " AI=" + ai.action : "") +
