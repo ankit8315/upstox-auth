@@ -55,6 +55,23 @@ async function fetchLTP(accessToken, keys) {
   }
 }
 
+// Full OHLC quotes for watchlist symbols (called every 5 min, not every poll)
+async function refreshWatchlistQuotes(accessToken) {
+  const watchlist = global.researchData && global.researchData.enrichedWatchlist;
+  if (!watchlist || watchlist.length === 0) return;
+  const keys = watchlist.slice(0, 12).map(s => "NSE_EQ|" + s.symbol).join(",");
+  try {
+    const r = await axios.get("https://api.upstox.com/v2/market-quote/quotes", {
+      headers: { Authorization: "Bearer " + accessToken, "Api-Version": "2" },
+      params:  { instrument_key: keys },
+      timeout: 10000
+    });
+    global.upstoxFullQuotes = r.data.data || {};
+  } catch (e) {
+    // Non-fatal — stockIntelligence will fetch per-symbol as fallback
+  }
+}
+
 async function processSignal(key, ltp, state, type, accessToken) {
   const newsScore = await getSymbolNewsScore(key);
   const scored    = scoreSignal(key, ltp, state, type, newsScore);
@@ -136,6 +153,7 @@ async function startPoller(accessToken, instrumentKeys) {
   console.log("Full Intelligence System: " + instrumentKeys.length + " instruments");
   console.log("Layers: Price + VWAP + Candles + News + Nifty + VIX + US + Sectors + AI");
   resetDailyFlags();
+  global.accessToken = accessToken; // expose for stockIntelligence.js
 
   await refreshMarketContext(accessToken);
   lastContextRefresh = Date.now();
@@ -172,6 +190,7 @@ async function startPoller(accessToken, instrumentKeys) {
 
     if (Date.now() - lastContextRefresh > CONTEXT_REFRESH_MS) {
       await refreshMarketContext(accessToken);
+      await refreshWatchlistQuotes(accessToken);  // cache full OHLC for enrichment
       lastContextRefresh = Date.now();
     }
     if (Date.now() - lastNewsRefresh > NEWS_REFRESH_MS) {
@@ -190,6 +209,10 @@ async function startPoller(accessToken, instrumentKeys) {
           if (!key || !ltp) continue;
           totalTicks++;
           currentPrices[key] = ltp;
+          // Also store by symbol name for easy lookup
+          const sym = key.replace("NSE_EQ|", "").split("|")[0];
+          currentPrices[sym] = ltp;
+          global.currentPrices = currentPrices;
           if (pollCount === 1 && totalTicks <= 3) console.log("Sample: " + key + " ltp=" + ltp);
 
           const state = updateTick(key, ltp, 0, now);

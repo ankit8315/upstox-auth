@@ -1,360 +1,388 @@
-// aiResearcher.js
-// Deep research AI — news → sector → stock → trade plan
-// OVERNIGHT: runs once per hour, builds tomorrow's watchlist
-// INTRADAY:  runs every 15 min, live market analysis
-// QUICK:     incremental news scan between deep runs
+// aiResearcher.js — Deep research AI that chains news → macro → sector → stock → trade
+// Core philosophy: every news event has a causal chain that ends at a specific NSE stock/ETF
+// The AI must reason through ALL chains, not just surface-level matching
 
 const axios = require("axios");
 
-const cache = {
-  deepReport: null,
-  deepAt:     0,
-  quickAt:    0,
-  lastMode:   null
-};
-
-const DEEP_INTRADAY_TTL_MS  = 14 * 60 * 1000;  // 14 min
-const DEEP_OVERNIGHT_TTL_MS = 58 * 60 * 1000;  // 58 min
-const QUICK_TTL_MS          = 14 * 60 * 1000;
-
-const providerBackoff = { gemini: 0, openai: 0, anthropic: 0 };
-
-async function callAI(prompt, maxTokens = 3000) {
-  const now = Date.now();
-
-  const providers = [];
-  if (process.env.ANTHROPIC_API_KEY && now > providerBackoff.anthropic) providers.push("anthropic");
-  if (process.env.GEMINI_API_KEY    && now > providerBackoff.gemini)    providers.push("gemini");
-  if (process.env.OPENAI_API_KEY    && now > providerBackoff.openai)    providers.push("openai");
-
-  if (providers.length === 0) {
-    const earliest = Math.min(...Object.values(providerBackoff).filter(t => t > 0));
-    const sec = Math.round((earliest - now) / 1000);
-    throw new Error("All AI providers rate-limited. Next retry in " + sec + "s");
+// ── Robust JSON extractor — handles truncated/fenced AI responses ─────────────
+function extractJSON(raw) {
+  if (!raw) return null;
+  let text = raw.replace(/```json|```/g, "").trim();
+  try { return JSON.parse(text); } catch (_) {}
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+  for (let end = text.length; end > start + 10; end--) {
+    if (text[end - 1] !== "}" && text[end - 1] !== "]") continue;
+    try { return JSON.parse(text.slice(start, end)); } catch (_) {}
   }
-
-  let lastErr = null;
-  for (const provider of providers) {
-    try {
-      console.log("[AI] Trying provider: " + provider);
-      const result = await callProvider(provider, prompt, maxTokens);
-      console.log("[AI] Success via " + provider);
-      return result;
-    } catch (err) {
-      lastErr = err;
-      const status = err.response && err.response.status;
-      if (status === 429 || status === 503) {
-        providerBackoff[provider] = Date.now() + 25 * 60 * 1000;
-        console.warn("[AI] " + provider + " rate limited — backing off 25min");
-      } else {
-        console.warn("[AI] " + provider + " failed (" + (status || err.message) + ")");
-      }
-    }
-  }
-  throw lastErr || new Error("All AI providers failed");
+  // Auto-close truncated JSON
+  const partial = text.slice(start);
+  const ob = (partial.match(/{/g)  || []).length;
+  const cb = (partial.match(/}/g)  || []).length;
+  const oa = (partial.match(/\[/g) || []).length;
+  const ca = (partial.match(/\]/g) || []).length;
+  let patched = partial.trimEnd()
+    .replace(/,?\s*"[^"]*"?\s*:?\s*"?[^"\n]*$/, "")
+    .replace(/,\s*$/, "");
+  for (let i = 0; i < oa - ca; i++) patched += "]";
+  for (let i = 0; i < ob - cb; i++) patched += "}";
+  try { return JSON.parse(patched); } catch (_) {}
+  return null;
 }
 
-async function callProvider(provider, prompt, maxTokens) {
+
+// Separate caches: quick 5-min for signal refresh, deep 15-min for full analysis
+const cache = {
+  deepReport:    null,
+  deepAt:        0,
+  quickUpdate:   null,
+  quickAt:       0
+};
+
+const DEEP_TTL_MS  = 15 * 60 * 1000;  // full reasoning every 15 min (expensive)
+const QUICK_TTL_MS =  5 * 60 * 1000;  // quick news scan every 5 min (cheap)
+
+function getProvider() {
+  if (process.env.ANTHROPIC_API_KEY) return "anthropic";
+  if (process.env.OPENAI_API_KEY)    return "openai";
+  if (process.env.GEMINI_API_KEY)    return "gemini";
+  return null;
+}
+
+async function callAI(prompt, maxTokens = 3000) {
+  const provider = getProvider();
+  if (!provider) throw new Error("No AI key set in .env");
+
   if (provider === "anthropic") {
     const r = await axios.post("https://api.anthropic.com/v1/messages", {
-      model:      "claude-haiku-4-5-20251001",
+      model: "claude-sonnet-4-20250514",
       max_tokens: maxTokens,
-      messages:   [{ role: "user", content: prompt }]
+      messages: [{ role: "user", content: prompt }]
     }, {
-      headers: {
-        "x-api-key":         process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json"
-      },
-      timeout: 90000
+      headers: { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      timeout: 45000
     });
     return r.data.content[0].text;
   }
 
-  if (provider === "gemini") {
-    const model = "gemini-2.5-flash";
-    const r = await axios.post(
-      "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + process.env.GEMINI_API_KEY,
-      {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: maxTokens }
-      },
-      { headers: { "Content-Type": "application/json" }, timeout: 90000 }
-    );
-    return r.data.candidates[0].content.parts[0].text;
-  }
-
   if (provider === "openai") {
     const r = await axios.post("https://api.openai.com/v1/chat/completions", {
-      model: "gpt-4o-mini", max_tokens: maxTokens, temperature: 0.3,
+      model: "gpt-4o", max_tokens: maxTokens, temperature: 0.2,
       messages: [
-        { role: "system", content: "You are an NSE trader. Respond ONLY in valid JSON, no markdown." },
-        { role: "user",   content: prompt }
+        { role: "system", content: "You are a senior NSE equity research analyst. Always respond in valid JSON only, no markdown fences." },
+        { role: "user", content: prompt }
       ]
     }, {
       headers: { "Authorization": "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" },
-      timeout: 90000
+      timeout: 45000
     });
     return r.data.choices[0].message.content;
   }
 
-  throw new Error("Unknown provider: " + provider);
+  if (provider === "gemini") {
+    const r = await axios.post(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=" + process.env.GEMINI_API_KEY,
+      {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: maxTokens }
+      },
+      { headers: { "Content-Type": "application/json" }, timeout: 45000 }
+    );
+    return r.data.candidates[0].content.parts[0].text;
+  }
 }
 
-// ─── Market phase ─────────────────────────────────────────────────────────────
-function getMarketPhase() {
-  const now  = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-  const mins = now.getHours() * 60 + now.getMinutes();
-  if (mins < 9 * 60 + 15)  return "PRE_MARKET";
-  if (mins < 9 * 60 + 30)  return "OPENING";
-  if (mins < 15 * 60 + 30) return "INTRADAY";
-  return "OVERNIGHT";
-}
+// ─── STEP 1: Chain-of-thought news → stocks reasoning ────────────────────────
+// This is the core — every news event is traced to specific NSE stocks/ETFs
 
-// ─── OVERNIGHT prompt — compact, focused on pre-breakout setups ───────────────
-function buildOvernightPrompt(news, fiidii, sectors, upcomingEarnings, ist) {
+function buildDeepResearchPrompt(news, fiidii, sectors, currentDateTime) {
+  const allNews = news.slice(0, 25).map((n, i) =>
+    `${i+1}. [${n.category.toUpperCase()}] ${n.title}\n   ${n.summary ? n.summary.slice(0, 150) : ""}\n   Source: ${n.source} | ${n.publishedAt ? n.publishedAt.slice(0, 16) : ""}`
+  ).join("\n\n");
 
-  const topNews = news.slice(0, 12).map((n, i) =>
-    `${i+1}. [${(n.category||"general").toUpperCase()}] ${n.title} (${n.source})`
+  const sectorData = sectors.sectors.map(s =>
+    `${s.name}: ${s.change >= 0 ? "+" : ""}${s.change.toFixed(2)}% | LTP: ${s.ltp} | Strength: ${s.strength}`
   ).join("\n");
 
-  const sectorLines = (sectors.sectors || []).map(s =>
-    `${s.name}: ${s.change >= 0 ? "+" : ""}${s.change.toFixed(2)}% (${s.strength})`
-  ).join(" | ");
+  const fiiData = fiidii.fii
+    ? `FII Net: ${(fiidii.fii.netValue/100).toFixed(0)} Cr (${fiidii.fii.sentiment})
+DII Net: ${(fiidii.dii.netValue/100).toFixed(0)} Cr (${fiidii.dii.sentiment})
+Smart Money: ${fiidii.smartMoneySignal ? fiidii.smartMoneySignal.label : "unknown"}
+3-Day FII Trend: ${fiidii.fii3DayTrend || "unknown"}`
+    : "FII/DII data unavailable";
 
-  const fiiLine = fiidii && fiidii.fii
-    ? `FII: ₹${(fiidii.fii.netValue/100).toFixed(0)}Cr (${fiidii.fii.sentiment}) | DII: ₹${(fiidii.dii.netValue/100).toFixed(0)}Cr`
-    : "FII/DII: unavailable";
+  return `You are a senior NSE equity research analyst with deep knowledge of Indian markets.
+Current time: ${currentDateTime} IST
 
-  const earningsLine = upcomingEarnings && upcomingEarnings.length > 0
-    ? upcomingEarnings.slice(0, 5).map(e => `${e.symbol} (${e.purpose})`).join(", ")
-    : "none";
+TASK: Perform DEEP chain-of-thought analysis of all market inputs to generate tomorrow's actionable NSE trading watchlist.
 
-  return `You are a profitable NSE trader. Time: ${ist} IST. Market CLOSED.
-Build tomorrow's pre-breakout watchlist. Focus on stocks BEFORE they move — volume building, news catalyst, key level.
+For EVERY major news event you MUST trace the full impact chain:
+Example chain: "Iran-Israel war escalates → oil supply fear → crude prices spike → 
+  POSITIVE: ONGC, Oil India, Reliance (upstream benefit), BPCL/HPCL mixed (refining margins squeezed)
+  POSITIVE: GOLDBEES, SILVERBEES, GOLDIETF (safe haven flows into gold/silver ETFs)  
+  POSITIVE: HAL, BEL, BHEL (defense stocks, geopolitical tension spending)
+  NEGATIVE: IndiGo, SpiceJet (aviation fuel costs spike)
+  NEGATIVE: Paint companies, Tyre companies (petrochem input costs rise)"
 
-NEWS (pick the most market-moving):
-${topNews}
+You must do this chain reasoning for EVERY significant news item.
 
-SECTORS TODAY: ${sectorLines}
-Advancing: ${(sectors.breadth||{}).advancing||"?"} | Declining: ${(sectors.breadth||{}).declining||"?"}
-${fiiLine}
-Earnings tomorrow: ${earningsLine}
+═══════════════════════════════════════
+LIVE NEWS (last 6 hours — most recent first):
+═══════════════════════════════════════
+${allNews}
 
-Pick 8-12 NSE stocks. Use correct NSE symbols. Every stock MUST have a specific news reason.
-Focus on pre-breakout setups: volume building + news catalyst + approaching key level.
+═══════════════════════════════════════
+NSE SECTOR PERFORMANCE TODAY:
+═══════════════════════════════════════
+${sectorData}
+Market Breadth: ${sectors.breadth.signal} | Advancing: ${sectors.breadth.advancing} | Declining: ${sectors.breadth.declining}
 
-Respond ONLY in valid JSON, no markdown:
+═══════════════════════════════════════
+FII/DII SMART MONEY FLOWS:
+═══════════════════════════════════════
+${fiiData}
+
+═══════════════════════════════════════
+ANALYSIS FRAMEWORK — reason through ALL of these:
+═══════════════════════════════════════
+
+1. GEOPOLITICAL: Wars, sanctions, trade tensions → commodities, defense, export/import impact
+2. MONETARY POLICY: RBI/Fed rate changes → banking, NBFCs, real estate, rate-sensitives  
+3. CURRENCY: USD/INR moves → IT exports (benefit), import-heavy cos (hurt), pharma (mixed)
+4. CRUDE OIL: Price direction → upstream oil cos, OMCs, aviation, paint, chemicals, tyres
+5. GOLD/SILVER: Safe haven demand → GOLDBEES, SILVERBEES, gold finance cos (Muthoot, Manappuram)
+6. FII FLOWS: Heavy buying → index heavyweights (HDFC Bank, Reliance, Infosys, TCS)
+7. EARNINGS/RESULTS: Beat/miss → direct stock + sector contagion
+8. SECTOR ROTATION: Which sectors FII rotating into vs out of
+9. GLOBAL INDICES: SGX Nifty, Dow, Nasdaq direction → gap-up/gap-down plays
+10. DOMESTIC MACRO: GDP, inflation, IIP → consumption vs investment theme
+
+NSE STOCK/ETF UNIVERSE TO CONSIDER (always use exact NSE symbols):
+- Gold ETFs: GOLDBEES, GOLDIETF, AXISGOLD, ICICIGOLD
+- Silver ETFs: SILVERBEES, SILVRETF  
+- Oil: ONGC, OIL, BPCL, HPCL, IOC, RELIANCE
+- Defense: HAL, BEL, BHEL, BEML, MIDHANI, COCHINSHIP
+- Banking: HDFCBANK, ICICIBANK, SBIN, AXISBANK, KOTAKBANK, BANDHANBNK, IDFCFIRSTB
+- IT: INFY, TCS, WIPRO, HCLTECH, TECHM, LTIM
+- Pharma: SUNPHARMA, DRREDDY, CIPLA, DIVISLAB, AUROPHARMA
+- Auto: TATAMOTORS, M&M, MARUTI, BAJAJ-AUTO, HEROMOTOCO, EICHERMOT
+- FMCG: HINDUNILVR, ITC, NESTLEIND, BRITANNIA, DABUR
+- Metal: TATASTEEL, JSWSTEEL, HINDALCO, COALINDIA, NMDC
+- Realty: DLF, GODREJPROP, PRESTIGE, BRIGADE, OBEROIRLTY
+- Index ETFs: NIFTYBEES, JUNIORBEES, BANKBEES, ITBEES, PSUBNKBEES
+- Chemicals: PIDILITIND, ASIAN PAINTS, BERGER, KANSAINER
+- Aviation: INDIGO, SPICEJET
+
+Respond ONLY in this exact JSON structure (no markdown, no extra text, valid JSON only):
 {
-  "mode": "OVERNIGHT",
+  "analysisTimestamp": "${new Date().toISOString()}",
   "marketOutlook": {
-    "bias": "BULLISH|BEARISH|SIDEWAYS",
-    "oneLiner": "one punchy sentence for tomorrow",
-    "summary": "2-3 sentences: global cues + FII + sector theme",
-    "openingExpectation": "GAP_UP|FLAT|GAP_DOWN",
-    "expectedNiftyRange": "22400-22650",
-    "tradingStyle": "AGGRESSIVE|SELECTIVE|DEFENSIVE",
-    "firstHalfBias": "BULLISH|BEARISH|WAIT",
-    "keyRisks": ["risk1", "risk2"],
-    "keyTailwinds": ["tailwind1"]
+    "bias": "BULLISH" | "BEARISH" | "SIDEWAYS",
+    "confidence": 1-10,
+    "oneLiner": "single punchy sentence for the day",
+    "summary": "3-4 sentence detailed outlook covering macro + FII + key themes",
+    "openingExpectation": "GAP_UP_STRONG" | "GAP_UP_MILD" | "FLAT" | "GAP_DOWN_MILD" | "GAP_DOWN_STRONG",
+    "keyRisks": ["specific risk 1", "specific risk 2", "specific risk 3"],
+    "keyTailwinds": ["specific tailwind 1", "specific tailwind 2", "specific tailwind 3"],
+    "tradingStyle": "AGGRESSIVE" | "SELECTIVE" | "DEFENSIVE" | "AVOID"
   },
+  "causalChains": [
+    {
+      "trigger": "exact news event or data point",
+      "triggerCategory": "GEOPOLITICAL" | "MONETARY" | "CRUDE" | "GOLD" | "FII" | "EARNINGS" | "CURRENCY" | "MACRO" | "SECTOR",
+      "chain": "trigger → intermediate effect → market impact (write the full chain in one sentence)",
+      "impactedStocks": [
+        {
+          "symbol": "NSE_SYMBOL",
+          "direction": "BUY" | "SELL" | "WATCH",
+          "reason": "exactly why this stock is impacted",
+          "magnitude": "HIGH" | "MEDIUM" | "LOW",
+          "immediacy": "TOMORROW_OPEN" | "THIS_WEEK" | "ONGOING"
+        }
+      ],
+      "urgency": "HIGH" | "MEDIUM" | "LOW",
+      "confidence": 1-10
+    }
+  ],
   "watchlist": [
     {
-      "symbol": "NSE_SYMBOL",
-      "companyName": "Company Name",
-      "sector": "sector",
-      "direction": "LONG|SHORT",
-      "tradeType": "BREAKOUT|MOMENTUM|NEWS_PLAY|GAP_TRADE|REVERSAL",
-      "thesis": "why this stock tomorrow — 1 specific sentence",
-      "newsLink": "which headline drives this",
-      "entryZone": { "low": 100, "high": 105, "note": "buy above X on volume" },
-      "stopLoss": 97,
-      "target1": 112,
-      "target2": 120,
-      "confidence": 8,
-      "timeOfDay": "OPEN|FIRST_30MIN|FIRST_HOUR|ANYTIME",
-      "invalidateIf": "specific price or event that kills this trade"
+      "symbol": "EXACT_NSE_SYMBOL",
+      "companyName": "Full Company Name",
+      "sector": "sector name",
+      "tradeType": "MOMENTUM" | "BREAKOUT" | "NEWS_PLAY" | "REVERSAL" | "ETF_FLOW",
+      "direction": "LONG" | "SHORT",
+      "thesis": "One crisp sentence — WHY this stock tomorrow",
+      "newsLink": "which news item triggered this (quote the headline briefly)",
+      "causalReasoning": "Full chain: news event → macro impact → sector effect → why this specific stock moves",
+      "catalysts": ["specific catalyst 1", "specific catalyst 2"],
+      "entryZone": {
+        "low": number,
+        "high": number,
+        "entryNote": "e.g. buy on dip to support / buy breakout above X"
+      },
+      "stopLoss": number,
+      "target1": number,
+      "target2": number,
+      "riskReward": "1:X",
+      "confidence": 1-10,
+      "timeOfDay": "OPEN_9:15" | "FIRST_30MIN" | "FIRST_HOUR" | "ANYTIME" | "AFTERNOON",
+      "holdTime": "15 mins" | "30 mins" | "1-2 hours" | "full day",
+      "watchIfNewsChanges": "condition that would invalidate this trade"
     }
   ],
   "sectorPlaybook": {
-    "strongBuy": ["sector1"],
-    "avoid": ["sector2"],
-    "rotationTheme": "one sentence on where smart money moving"
+    "strongBuy": [{ "sector": "name", "reason": "why", "etf": "ETF symbol if any" }],
+    "strongSell": [{ "sector": "name", "reason": "why" }],
+    "rotationTheme": "where smart money moving today in 1 sentence",
+    "avoidSectors": ["sector1", "sector2"]
   },
-  "premarketBriefing": {
-    "firstTrade": "best first trade at 9:15 — stock, entry, why",
-    "dontChase": "what to avoid even if opens strong"
-  }
-}`;
-}
-
-// ─── INTRADAY prompt — live market, compact ───────────────────────────────────
-function buildIntradayPrompt(news, fiidii, sectors, ist) {
-
-  const topNews = news.slice(0, 8).map((n, i) =>
-    `${i+1}. ${n.title} (${n.source})`
-  ).join("\n");
-
-  const sectorLines = (sectors.sectors || []).slice(0, 8).map(s =>
-    `${s.name}: ${s.change >= 0 ? "+" : ""}${s.change.toFixed(2)}%`
-  ).join(" | ");
-
-  const fiiLine = fiidii && fiidii.fii
-    ? `FII: ₹${(fiidii.fii.netValue/100).toFixed(0)}Cr (${fiidii.fii.sentiment})`
-    : "FII: unavailable";
-
-  return `NSE trader. Time: ${ist}. Market OPEN.
-
-NEWS:
-${topNews}
-
-SECTORS: ${sectorLines}
-Advancing: ${(sectors.breadth||{}).advancing||"?"} | Declining: ${(sectors.breadth||{}).declining||"?"}
-${fiiLine}
-
-Find stocks BEFORE they break out — volume building, news catalyst, approaching key level.
-Pick 8-10 stocks. Every pick must have a specific news or data reason.
-
-Respond ONLY in valid JSON, no markdown:
-{
-  "mode": "INTRADAY",
-  "marketOutlook": {
-    "bias": "BULLISH|BEARISH|SIDEWAYS",
-    "oneLiner": "one sentence",
-    "tradingStyle": "AGGRESSIVE|SELECTIVE|DEFENSIVE"
+  "fiiDiiPlaybook": {
+    "interpretation": "2-3 sentence deep interpretation of FII/DII flows and what they signal",
+    "impliedBias": "which stocks FII likely buying/selling based on flows",
+    "followTheMoney": ["SYMBOL1", "SYMBOL2", "SYMBOL3"]
   },
-  "watchlist": [
+  "riskMatrix": [
     {
-      "symbol": "NSE_SYMBOL",
-      "companyName": "Name",
-      "sector": "sector",
-      "direction": "LONG|SHORT",
-      "tradeType": "BREAKOUT|MOMENTUM|NEWS_PLAY|REVERSAL",
-      "thesis": "why now — 1 sentence with specific reason",
-      "newsLink": "which headline",
-      "entryZone": { "low": 100, "high": 105, "note": "entry condition" },
-      "stopLoss": 97,
-      "target1": 112,
-      "target2": 120,
-      "confidence": 8,
-      "timeOfDay": "NOW|FIRST_30MIN|ANYTIME",
-      "invalidateIf": "what kills this trade"
+      "risk": "specific risk description",
+      "probability": "HIGH" | "MEDIUM" | "LOW",
+      "hedgeWith": "how to hedge or which stock to avoid"
     }
   ],
-  "sectorPlaybook": {
-    "strongBuy": ["sector1"],
-    "avoid": ["sector2"],
-    "rotationTheme": "one sentence"
-  }
-}`;
+  "dynamicAlerts": [
+    {
+      "watchFor": "specific event or price level to monitor during the day",
+      "ifHappens": "what to do / what it signals",
+      "affectedSymbols": ["SYMBOL1"]
+    }
+  ]
 }
 
-// ─── QUICK UPDATE prompt ──────────────────────────────────────────────────────
+IMPORTANT RULES:
+1. Use ONLY real NSE-listed symbols. Never invent symbols.
+2. Give SPECIFIC price levels based on approximate current market levels.
+3. Every watchlist item MUST have a causalReasoning that traces back to actual news/data.
+4. watchIfNewsChanges is critical — markets change fast, tell us what invalidates the trade.
+5. Include 6-10 watchlist stocks minimum. Mix ETFs and individual stocks.
+6. dynamicAlerts are intraday triggers — things to watch DURING the trading session.`;
+}
+
+// ─── STEP 2: Quick 5-min incremental news update (cheaper, faster) ────────────
+
 function buildQuickUpdatePrompt(newArticles, existingWatchlist) {
-  const newsText = newArticles.slice(0, 5).map(n =>
-    `${n.title} (${n.source})`
+  const newsText = newArticles.slice(0, 8).map(n =>
+    `[${n.category.toUpperCase()}] ${n.title} — ${n.summary ? n.summary.slice(0, 100) : ""}`
   ).join("\n");
 
-  const symbols = (existingWatchlist || []).map(w => w.symbol).join(", ");
+  const existingSymbols = (existingWatchlist || []).map(w => w.symbol).join(", ");
 
-  return `NSE trader. Breaking news in last 10 minutes:
+  return `You are an NSE intraday trader. New news just broke in last 5 minutes.
 
+NEW HEADLINES:
 ${newsText}
 
-Current watchlist: ${symbols || "none"}
+CURRENT WATCHLIST: ${existingSymbols}
 
-Any urgent changes? Respond in valid JSON only:
+TASK: Based ONLY on this new news, respond in valid JSON:
 {
-  "hasSignificantChange": true,
+  "hasSignificantChange": true | false,
   "urgentAlerts": [
-    { "symbol": "NSE_SYMBOL", "direction": "BUY|SELL", "reason": "one line why", "urgency": "HIGH|MEDIUM" }
+    {
+      "headline": "the news",
+      "impactedSymbols": ["SYMBOL1", "SYMBOL2"],
+      "direction": "BUY" | "SELL",
+      "reason": "quick 1-line reason",
+      "urgency": "HIGH" | "MEDIUM"
+    }
   ],
   "addToWatchlist": [
     {
-      "symbol": "NSE_SYMBOL", "thesis": "why", "newsLink": "headline",
-      "entryZone": { "low": 100, "high": 105 }, "stopLoss": 97, "target1": 112, "confidence": 8,
-      "invalidateIf": "condition"
+      "symbol": "NSE_SYMBOL",
+      "thesis": "one sentence why",
+      "newsLink": "which headline",
+      "tradeType": "NEWS_PLAY",
+      "entryZone": { "low": 0, "high": 0 },
+      "stopLoss": 0,
+      "target1": 0,
+      "confidence": 1-10
     }
   ],
-  "removeFromWatchlist": [],
-  "marketBiasChange": null
+  "removeFromWatchlist": ["SYMBOL_THAT_IS_NOW_INVALID"],
+  "marketBiasChange": null | "now more BULLISH" | "now more BEARISH"
 }`;
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
-async function generateResearch(news, fiidii, sectors, upcomingEarnings) {
-  const now       = Date.now();
-  const phase     = getMarketPhase();
-  const ist       = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-  const isOvernight = (phase === "OVERNIGHT" || phase === "PRE_MARKET");
-  const deepTTL   = isOvernight ? DEEP_OVERNIGHT_TTL_MS : DEEP_INTRADAY_TTL_MS;
+// ─── Main export ──────────────────────────────────────────────────────────────
 
-  const needsRefresh = !cache.deepReport
-    || (now - cache.deepAt >= deepTTL)
-    || (cache.lastMode !== (isOvernight ? "OVERNIGHT" : "INTRADAY"));
+async function generateResearch(news, fiidii, sectors) {
+  const now = Date.now();
 
-  if (needsRefresh) {
-    const mode = isOvernight ? "OVERNIGHT" : "INTRADAY";
-    console.log("[aiResearcher] Running " + mode + " deep analysis at " + ist);
+  // Full deep analysis every 15 min
+  if (!cache.deepReport || now - cache.deepAt >= DEEP_TTL_MS) {
+    console.log("Running DEEP research analysis...");
+    const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 
     try {
-      const prompt = isOvernight
-        ? buildOvernightPrompt(news, fiidii, sectors, upcomingEarnings || [], ist)
-        : buildIntradayPrompt(news, fiidii, sectors, ist);
-
-      const raw    = await callAI(prompt, 3000);
-      const clean  = raw.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean);
+      const prompt = buildDeepResearchPrompt(news, fiidii, sectors, ist);
+      const raw    = await callAI(prompt, 6000);
+      const parsed = extractJSON(raw);
+      if (!parsed) throw new Error("extractJSON failed — raw length: " + (raw||"").length);
 
       cache.deepReport = parsed;
       cache.deepAt     = now;
-      cache.lastMode   = mode;
 
       console.log(
-        "[aiResearcher] " + mode + " done: bias=" + ((parsed.marketOutlook || {}).bias || "?") +
-        " watchlist=" + (parsed.watchlist || []).length
+        "DEEP research done: bias=" + (parsed.marketOutlook || {}).bias +
+        " watchlist=" + (parsed.watchlist || []).length +
+        " chains=" + (parsed.causalChains || []).length
       );
     } catch (e) {
-      console.error("[aiResearcher] Deep analysis error:", e.message);
-      if (cache.deepReport) {
-        console.log("[aiResearcher] Returning stale cache");
-        return cache.deepReport;
-      }
+      console.error("Deep research error:", e.message);
+      // Return stale cache if available
+      if (cache.deepReport) return cache.deepReport;
       return null;
     }
   }
 
-  // Quick update during intraday only
-  if (!isOvernight && news.length > 0 && now - cache.quickAt >= QUICK_TTL_MS) {
+  // Quick incremental update every 5 min (only if new news exists)
+  if (news.length > 0 && now - cache.quickAt >= QUICK_TTL_MS) {
     const recentNews = news.filter(n => {
       const age = now - new Date(n.publishedAt || 0).getTime();
-      return age < 10 * 60 * 1000;
+      return age < 10 * 60 * 1000; // only news from last 10 min
     });
 
     if (recentNews.length > 0 && cache.deepReport) {
-      console.log("[aiResearcher] Quick update: " + recentNews.length + " new articles");
+      console.log("Running QUICK news update for " + recentNews.length + " new articles...");
       try {
-        const prompt = buildQuickUpdatePrompt(recentNews, cache.deepReport.watchlist);
-        const raw    = await callAI(prompt, 1000);
-        const clean  = raw.replace(/```json|```/g, "").trim();
-        const update = JSON.parse(clean);
+        const prompt  = buildQuickUpdatePrompt(recentNews, cache.deepReport.watchlist);
+        const raw     = await callAI(prompt, 2000);
+        const update  = extractJSON(raw);
+        if (!update) throw new Error("extractJSON failed on quick update");
 
         cache.quickAt = now;
 
         if (update.hasSignificantChange) {
+          console.log("Quick update: significant change detected — " + (update.urgentAlerts || []).length + " alerts");
+
+          // Merge quick update into deep report
           if (update.addToWatchlist && update.addToWatchlist.length > 0) {
             cache.deepReport.watchlist = [
               ...update.addToWatchlist.map(s => ({ ...s, tradeType: "NEWS_PLAY", addedByQuickUpdate: true })),
-              ...(cache.deepReport.watchlist || []).filter(w =>
+              ...cache.deepReport.watchlist.filter(w =>
                 !(update.removeFromWatchlist || []).includes(w.symbol)
               )
             ];
           }
-          cache.deepReport.urgentAlerts  = update.urgentAlerts || [];
-          cache.deepReport.quickUpdateAt = new Date().toISOString();
+
+          // Attach urgent alerts to report
+          cache.deepReport.urgentAlerts    = update.urgentAlerts || [];
+          cache.deepReport.quickUpdateAt   = new Date().toISOString();
+
+          if (update.marketBiasChange) {
+            cache.deepReport.marketOutlook.quickBiasUpdate = update.marketBiasChange;
+          }
         }
       } catch (e) {
-        console.error("[aiResearcher] Quick update error:", e.message);
+        console.error("Quick update error:", e.message);
       }
     }
   }
@@ -362,4 +390,4 @@ async function generateResearch(news, fiidii, sectors, upcomingEarnings) {
   return cache.deepReport;
 }
 
-module.exports = { generateResearch, getMarketPhase, providerBackoff };
+module.exports = { generateResearch };
