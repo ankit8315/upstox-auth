@@ -95,14 +95,38 @@ async function callAI(prompt, maxTokens = 3000) {
 // ─── STEP 1: Chain-of-thought news → stocks reasoning ────────────────────────
 // This is the core — every news event is traced to specific NSE stocks/ETFs
 
+// Builds a dynamic universe from live price data — groups tracked stocks by extracting symbols
+function buildLiveUniverse() {
+  try {
+    const prices = global.currentPrices || {};
+    const symbols = Object.keys(prices)
+      .filter(k => k.startsWith("NSE_EQ|"))
+      .map(k => k.replace("NSE_EQ|", ""))
+      .filter(s => prices["NSE_EQ|" + s] > 0);
+
+    if (symbols.length === 0) {
+      return "Full 500-stock F&O universe available. Pick stocks based on news/sector/causal logic.";
+    }
+
+    // Chunk into groups of 20 for readability
+    const chunks = [];
+    for (let i = 0; i < Math.min(symbols.length, 200); i += 20) {
+      chunks.push(symbols.slice(i, i + 20).join(", "));
+    }
+
+    return `${symbols.length} live NSE stocks currently tracked with real prices:\n${chunks.join("\n")}\n\n⚠️ Pick ANY of these — not limited to any preset list. Choose based purely on news/sector/momentum logic.`;
+  } catch (e) {
+    return "Full 500-stock F&O universe. Pick stocks based on news + sector + causal reasoning.";
+  }
+}
+
 function buildDeepResearchPrompt(news, fiidii, sectors, currentDateTime, upcomingEarnings) {
+  const earningsStr = upcomingEarnings && upcomingEarnings.length > 0
+    ? upcomingEarnings.map(e => `${e.symbol}: ${e.purpose || "Board Meeting"} on ${e.date || "upcoming"}`).join("\n")
+    : "None";
   const allNews = news.slice(0, 25).map((n, i) =>
     `${i+1}. [${n.category.toUpperCase()}] ${n.title}\n   ${n.summary ? n.summary.slice(0, 150) : ""}\n   Source: ${n.source} | ${n.publishedAt ? n.publishedAt.slice(0, 16) : ""}`
   ).join("\n\n");
-
-  const earningsData = upcomingEarnings && upcomingEarnings.length > 0
-    ? upcomingEarnings.map(e => `${e.symbol}: ${e.purpose || "Board Meeting"} on ${e.date || "upcoming"}`).join("\n")
-    : "No upcoming earnings data";
 
   const sectorData = sectors.sectors.map(s =>
     `${s.name}: ${s.change >= 0 ? "+" : ""}${s.change.toFixed(2)}% | LTP: ${s.ltp} | Strength: ${s.strength}`
@@ -117,8 +141,7 @@ Smart Money: ${fiidii.smartMoneySignal ? fiidii.smartMoneySignal.label : "unknow
 
   return `You are a senior NSE equity research analyst with deep knowledge of Indian markets.
 Current time: ${currentDateTime} IST
-Upcoming Earnings/Board Meetings:\n${earningsData}\n
-
+Upcoming Earnings/Board Meetings:\n${earningsStr}\n
 TASK: Perform DEEP chain-of-thought analysis of all market inputs to generate tomorrow's actionable NSE trading watchlist.
 
 For EVERY major news event you MUST trace the full impact chain:
@@ -162,21 +185,10 @@ ANALYSIS FRAMEWORK — reason through ALL of these:
 9. GLOBAL INDICES: SGX Nifty, Dow, Nasdaq direction → gap-up/gap-down plays
 10. DOMESTIC MACRO: GDP, inflation, IIP → consumption vs investment theme
 
-NSE STOCK/ETF UNIVERSE TO CONSIDER (always use exact NSE symbols):
-- Gold ETFs: GOLDBEES, GOLDIETF, AXISGOLD, ICICIGOLD
-- Silver ETFs: SILVERBEES, SILVRETF  
-- Oil: ONGC, OIL, BPCL, HPCL, IOC, RELIANCE
-- Defense: HAL, BEL, BHEL, BEML, MIDHANI, COCHINSHIP
-- Banking: HDFCBANK, ICICIBANK, SBIN, AXISBANK, KOTAKBANK, BANDHANBNK, IDFCFIRSTB
-- IT: INFY, TCS, WIPRO, HCLTECH, TECHM, LTIM
-- Pharma: SUNPHARMA, DRREDDY, CIPLA, DIVISLAB, AUROPHARMA
-- Auto: TATAMOTORS, M&M, MARUTI, BAJAJ-AUTO, HEROMOTOCO, EICHERMOT
-- FMCG: HINDUNILVR, ITC, NESTLEIND, BRITANNIA, DABUR
-- Metal: TATASTEEL, JSWSTEEL, HINDALCO, COALINDIA, NMDC
-- Realty: DLF, GODREJPROP, PRESTIGE, BRIGADE, OBEROIRLTY
-- Index ETFs: NIFTYBEES, JUNIORBEES, BANKBEES, ITBEES, PSUBNKBEES
-- Chemicals: PIDILITIND, ASIAN PAINTS, BERGER, KANSAINER
-- Aviation: INDIGO, SPICEJET
+LIVE UNIVERSE — TOP MOVERS RIGHT NOW (from actual 500-stock scan):
+${buildLiveUniverse()}
+
+Pick watchlist stocks from this live universe. Do NOT limit yourself to any fixed list — any of the 500 NSE F&O stocks can appear if news/sector/causal logic supports it. Always use exact NSE trading symbols.
 
 Respond ONLY in this exact JSON structure (no markdown, no extra text, valid JSON only):
 {
