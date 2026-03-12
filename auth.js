@@ -6,6 +6,7 @@ const { startPoller }          = require("./poller");
 const { executeBuy }           = require("./orderManager");
 const { startResearchEngine }  = require("./researchEngine");
 const { getOpenPositions, getAllPositions, getTodayPnL } = require("./riskEngine");
+const { getPreBreakoutCandidates } = require("./preBreakoutEngine");
 
 const app         = express();
 const PORT        = process.env.PORT || 3000;
@@ -23,6 +24,18 @@ if (!accessToken) { console.error("UPSTOX_ACCESS_TOKEN missing"); process.exit(1
 // ── In-memory stores ──────────────────────────────────────────────────
 const breakouts = [];
 const trades    = [];
+
+// Add global store
+global.preBreakouts = [];
+global.addPreBreakout = (alert) => {
+  global.preBreakouts.unshift(alert);
+  if (global.preBreakouts.length > 50) global.preBreakouts.pop();
+};
+
+// Add API endpoint
+app.get("/pre-breakouts", (req, res) => {
+  res.json({ alerts: global.preBreakouts || [] });
+});
 
 global.addBreakout = (data) => {
   const recent = breakouts.find(b => b.symbol === data.symbol && Date.now() - new Date(b.time).getTime() < 120000);
