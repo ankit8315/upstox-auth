@@ -274,7 +274,7 @@ function startResearchEngine() {
   // Smart scheduler — overnight calls AI once per hour, intraday every 15 min
   // This keeps API calls at ~20/day instead of ~288/day — no more rate limits
   function scheduleNext() {
-    const phase = require("./aiResearcher").getMarketPhase();
+    const phase = getMarketPhase();
     const isMarket = (phase === "INTRADAY" || phase === "OPENING");
     const interval = isMarket ? REFRESH_INTERVAL_INTRADAY_MS : REFRESH_INTERVAL_OVERNIGHT_MS;
     console.log("[Research] Next refresh in " + Math.round(interval/60000) + "min [" + phase + "]");
