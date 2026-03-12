@@ -11,6 +11,7 @@ const { calculatePosition, canTrade }       = require("./riskEngine");
 const { monitorPositions, resetDailyFlags } = require("./orderManager");
 const { refreshMarketContext, isSafeToTrade, context, getTopSectors } = require("./marketContext");
 const { refreshAll: refreshNews, getSymbolNewsScore } = require("./newsEngine");
+const { processTick: breakoutEngineTick }            = require("./breakoutEngine");
 
 const POLL_INTERVAL_MS      = 10000;
 const BATCH_SIZE            = 500;
@@ -155,6 +156,19 @@ async function startPoller(accessToken, instrumentKeys) {
   resetDailyFlags();
   global.accessToken = accessToken; // expose for stockIntelligence.js
 
+  // Pre-breakout store — feeds /api/pre-breakouts endpoint
+  if (!global.preBreakouts) global.preBreakouts = [];
+  global.addPreBreakout = (data) => {
+    const recent = global.preBreakouts.find(b =>
+      b.symbol === data.symbol && Date.now() - new Date(b.time).getTime() < 10 * 60 * 1000
+    );
+    if (recent) return; // dedupe within 10 min
+    data.alertedAt = Date.now();
+    global.preBreakouts.unshift(data);
+    if (global.preBreakouts.length > 100) global.preBreakouts.pop();
+    console.log("[preBreakout] Stored: " + data.symbol + " " + data.type);
+  };
+
   await refreshMarketContext(accessToken);
   lastContextRefresh = Date.now();
 
@@ -206,12 +220,16 @@ async function startPoller(accessToken, instrumentKeys) {
         try {
           const key = val.instrument_token;
           const ltp = val.last_price;
+          const tradingSymbol = val.trading_symbol || val.tradingSymbol || "";
           if (!key || !ltp) continue;
           totalTicks++;
           currentPrices[key] = ltp;
-          // Also store by symbol name for easy lookup
-          const sym = key.replace("NSE_EQ|", "").split("|")[0];
-          currentPrices[sym] = ltp;
+          // Store by NSE trading symbol for easy lookup
+          if (tradingSymbol) {
+            currentPrices[tradingSymbol] = ltp;
+            if (!global.instrumentSymbolMap) global.instrumentSymbolMap = {};
+            global.instrumentSymbolMap[key] = tradingSymbol;
+          }
           global.currentPrices = currentPrices;
           if (pollCount === 1 && totalTicks <= 3) console.log("Sample: " + key + " ltp=" + ltp);
 
@@ -223,6 +241,8 @@ async function startPoller(accessToken, instrumentKeys) {
           if (signal) await processSignal(key, ltp, state, "strategy", accessToken);
 
           const td = tickStore(key, ltp);
+          // Feed preBreakoutEngine via breakoutEngine on every tick
+          breakoutEngineTick(key, ltp);
           // FIX: previousHigh is the 5min high BEFORE adding current tick
           // ltp >= td.high5Min is always true — we need ltp to be a NEW high
           // i.e. ltp > what the high was last poll (stored as td.prevHigh5Min)

@@ -8,8 +8,15 @@ const { processTick: preBreakoutCheck, registerSectorMove } = require("./preBrea
 function processTick(instrumentKey, ltp) {
   const data = updateTick(instrumentKey, ltp);
 
-  // Clean symbol: "NSE_EQ|INE123456789" → "JPPOWER"
-  const symbol    = instrumentKey.split("|").pop().split("-")[0];
+  // Get clean NSE symbol from global currentPrices map or strip prefix
+  // instrumentKey = "NSE_EQ|INE519A01011" — we need "NTPC"
+  // currentPrices stores both "NSE_EQ|INE..." and the symbol name
+  // Use fnoRegistry to reverse-map if possible
+  let symbol = instrumentKey.replace("NSE_EQ|", "").replace("NSE_FO|", "");
+  // Try to get proper display symbol from global instrument map
+  if (global.instrumentSymbolMap && global.instrumentSymbolMap[instrumentKey]) {
+    symbol = global.instrumentSymbolMap[instrumentKey];
+  }
   const sector    = getSectorForSymbol(symbol) || "Unknown";
   const openPrice = data.ticks.length > 0 ? data.ticks[0].price : ltp;
 
