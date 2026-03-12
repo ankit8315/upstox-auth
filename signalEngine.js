@@ -13,7 +13,7 @@
 
 const { context } = require("./marketContext");
 
-const SIGNAL_THRESHOLD = 60;
+const SIGNAL_THRESHOLD = 50; // was 60 — was blocking valid signals on high-VIX sideways days
 
 function getSessionScore(hour, min) {
   const t = hour * 60 + min;
@@ -68,11 +68,15 @@ function scoreSignal(symbol, ltp, state, signalType, newsScore) {
     rawScore += pts;
     reasons.push("Nifty bullish +" + niftyChg.toFixed(2) + "%");
   } else if (niftyDir === "sideways") {
-    rawScore += 8;
+    // Sideways = rotation day, individual stocks move a LOT
+    rawScore += 14;
+    reasons.push("Nifty sideways — rotation/momentum plays active");
   } else if (niftyDir === "bear") {
-    warnings.push("Nifty bearish " + niftyChg.toFixed(2) + "% — risky longs");
+    // Bear market still has 5%+ movers — score lower but don't block
+    rawScore += 3;
+    warnings.push("Nifty bearish " + niftyChg.toFixed(2) + "% — select stocks only");
   } else {
-    rawScore += 8; // unknown
+    rawScore += 10; // unknown
   }
 
   // ── 3. VIX level (0-15) ──────────────────────────────────────────
@@ -80,7 +84,8 @@ function scoreSignal(symbol, ltp, state, signalType, newsScore) {
   if (vixLevel === "low")      { rawScore += 15; reasons.push("Low VIX " + context.vix + " — stable market"); }
   else if (vixLevel === "medium") { rawScore += 10; }
   else if (vixLevel === "high")   { rawScore += 3; warnings.push("High VIX " + context.vix + " — volatile"); }
-  else if (vixLevel === "extreme") { warnings.push("Extreme VIX " + context.vix + " — avoid trading"); }
+  else if (vixLevel === "high")    { rawScore += 5; warnings.push("High VIX " + context.vix + " — use tight SL"); }
+  else if (vixLevel === "extreme") { warnings.push("Extreme VIX " + context.vix + " — only high-conviction plays"); }
   else { rawScore += 8; } // unknown
 
   // ── 4. US market cues (0-10) ─────────────────────────────────────
@@ -166,18 +171,17 @@ function scoreSignal(symbol, ltp, state, signalType, newsScore) {
   // ── Normalize to 100 ─────────────────────────────────────────────
   const score = Math.max(0, Math.min(100, Math.round(rawScore * 100 / 130)));
 
-  // ── Hard blocks ───────────────────────────────────────────────────
+  // ── Hard blocks — only truly untradeable conditions ──────────────
+  // NOTE: Nifty bearish is NOT a hard block — individual stocks still move 5%+
+  // NOTE: VIX extreme is handled by isSafeToTrade() with corrected thresholds
+  // NOTE: Poor trading time reduces score but doesn't block — can still catch news plays
   const hardBlock = warnings.some(w =>
-    w.includes("Nifty bearish") ||
-    w.includes("Penny stock") ||
-    w.includes("Poor trading time") ||
-    w.includes("Extreme VIX") ||
-    w.includes("Negative news")
+    w.includes("Penny stock")    // under ₹10 — skip always
   );
 
   return {
     symbol, ltp, score,
-    grade: score >= 80 ? "A" : score >= 65 ? "B" : "C",
+    grade: score >= 75 ? "A" : score >= 60 ? "B" : "C",
     reasons, warnings,
     sessionTime: hour + ":" + String(min).padStart(2, "0"),
     niftyDirection: context.niftyDirection,

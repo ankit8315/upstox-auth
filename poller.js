@@ -143,13 +143,17 @@ async function startPoller(accessToken, instrumentKeys) {
   await refreshNews();
   lastNewsRefresh = Date.now();
 
+  const safeStatus = require("./marketContext").isSafeToTrade();
+  const safeEmoji  = safeStatus.safe ? "✅" : "🚫";
+
   sendTelegramAlert(
     "🌅 SCANNER STARTED\n" +
     "Nifty: " + context.niftyDirection + " " + context.niftyChange.toFixed(2) + "%\n" +
     "VIX: " + context.vix + " (" + context.vixLevel + ")\n" +
     "US: " + context.usMarkets.sentiment + " S&P " + context.usMarkets.sp500Change + "%\n" +
     "Market Score: " + context.overallScore + "/100 (" + context.overallSentiment + ")\n" +
-    "Stocks: " + instrumentKeys.length
+    "Signal threshold: 50/100 | Stocks: " + instrumentKeys.length + "\n" +
+    safeEmoji + " Trading: " + (safeStatus.safe ? "ACTIVE — alerts will fire" : "BLOCKED — " + safeStatus.reason)
   );
 
   let pollCount = 0, totalTicks = 0;
@@ -196,9 +200,16 @@ async function startPoller(accessToken, instrumentKeys) {
           if (signal) await processSignal(key, ltp, state, "strategy", accessToken);
 
           const td = tickStore(key, ltp);
-          if (td.high5Min && ltp >= td.high5Min && td.ticks.length >= 3 &&
-              now - (td.lastBreakoutTime || 0) > 60000) {
+          // FIX: previousHigh is the 5min high BEFORE adding current tick
+          // ltp >= td.high5Min is always true — we need ltp to be a NEW high
+          // i.e. ltp > what the high was last poll (stored as td.prevHigh5Min)
+          const prevHigh = td.prevHigh5Min || 0;
+          td.prevHigh5Min = td.high5Min; // store for next poll
+          const isNewHigh = prevHigh > 0 && ltp > prevHigh && ltp >= td.high5Min;
+          if (isNewHigh && td.ticks.length >= 3 &&
+              now - (td.lastBreakoutTime || 0) > 90000) {
             td.lastBreakoutTime = now;
+            console.log("5MIN BREAKOUT: " + key.replace("NSE_EQ|","") + " prev=" + prevHigh.toFixed(2) + " now=" + ltp);
             await processSignal(key, ltp, state, "5min_high", accessToken);
           }
         } catch (e) {}
@@ -215,7 +226,11 @@ async function startPoller(accessToken, instrumentKeys) {
     if (pollCount <= WARMUP_POLLS) {
       console.log("Warmup " + pollCount + "/" + WARMUP_POLLS + " ticks=" + totalTicks + " " + elapsed + "ms Nifty=" + context.niftyDirection + " VIX=" + context.vixLevel);
     } else if (pollCount % 6 === 0) {
-      console.log("Poll #" + pollCount + " ticks=" + totalTicks + " " + elapsed + "ms | " + context.overallSentiment);
+      console.log(
+        "Poll #" + pollCount + " ticks=" + totalTicks + " " + elapsed + "ms" +
+        " | Nifty=" + context.niftyDirection + " VIX=" + context.vix + "(" + context.vixLevel + ")" +
+        " | Score=" + context.overallScore + " Safe=" + require("./marketContext").isSafeToTrade().safe
+      );
     }
 
     setTimeout(poll, Math.max(0, POLL_INTERVAL_MS - elapsed));

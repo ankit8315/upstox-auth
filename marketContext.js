@@ -70,10 +70,11 @@ async function fetchNiftyAndVIX(accessToken) {
       }
       if (key.includes("VIX")) {
         context.vix = val.last_price;
-        if (context.vix < 12)       context.vixLevel = "low";       // great for trading
-        else if (context.vix < 16)  context.vixLevel = "medium";    // normal
-        else if (context.vix < 20)  context.vixLevel = "high";      // cautious
-        else                        context.vixLevel = "extreme";   // avoid trading
+        // India VIX: 20 is normal. Only block above 30 (true panic).
+        if (context.vix < 14)       context.vixLevel = "low";       // great
+        else if (context.vix < 20)  context.vixLevel = "medium";    // normal
+        else if (context.vix < 28)  context.vixLevel = "high";      // cautious but tradeable
+        else                        context.vixLevel = "extreme";   // true panic, avoid
       }
     }
   } catch (e) {
@@ -214,9 +215,11 @@ function getWeakSectors() {
 
 // ── Check if safe to trade ────────────────────────────────────────────
 function isSafeToTrade() {
-  if (context.vixLevel === "extreme") return { safe: false, reason: "VIX too high (" + context.vix + ") — market very volatile" };
-  if (context.niftyDirection === "bear" && context.niftyChange < -1) return { safe: false, reason: "Nifty falling hard " + context.niftyChange.toFixed(2) + "%" };
-  if (context.overallScore < -40) return { safe: false, reason: "Overall market bearish — avoid longs" };
+  // Only block on genuine panic: VIX > 28, Nifty crash > 2%, or full market meltdown
+  if (context.vixLevel === "extreme") return { safe: false, reason: "VIX extreme (" + context.vix + ") — panic mode, avoid" };
+  if (context.niftyDirection === "bear" && context.niftyChange < -2) return { safe: false, reason: "Nifty crashing " + context.niftyChange.toFixed(2) + "%" };
+  if (context.overallScore < -60) return { safe: false, reason: "Full market meltdown — avoid longs" };
+  // Sideways + high VIX = reduce but don't block (these days have the best individual movers)
   return { safe: true };
 }
 
