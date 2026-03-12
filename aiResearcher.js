@@ -390,4 +390,15 @@ async function generateResearch(news, fiidii, sectors) {
   return cache.deepReport;
 }
 
-module.exports = { generateResearch };
+function getMarketPhase() {
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const d = now.getDay(), h = now.getHours(), m = now.getMinutes();
+  if (d === 0 || d === 6) return "OVERNIGHT";
+  const totalMin = h * 60 + m;
+  if (totalMin < 9 * 60)                    return "OVERNIGHT";
+  if (totalMin < 9 * 60 + 15)               return "OPENING";
+  if (totalMin <= 15 * 60 + 35)             return "INTRADAY";
+  return "OVERNIGHT";
+}
+
+module.exports = { generateResearch, getMarketPhase };
