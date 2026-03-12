@@ -488,5 +488,4 @@ function invalidateCache() {
   tradeCallsCache.generatedAt = 0;
   thesisCheckCache.checkedAt  = 0;
 }
-
 module.exports = { generateTradeCalls, checkTheses, calcPosition, invalidateCache };
