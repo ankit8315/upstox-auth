@@ -60,7 +60,7 @@ async function callAI(prompt, maxTokens = 3000) {
       messages: [{ role: "user", content: prompt }]
     }, {
       headers: { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      timeout: 45000
+      timeout: 90000
     });
     return r.data.content[0].text;
   }
@@ -74,7 +74,7 @@ async function callAI(prompt, maxTokens = 3000) {
       ]
     }, {
       headers: { "Authorization": "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" },
-      timeout: 45000
+      timeout: 90000
     });
     return r.data.choices[0].message.content;
   }
@@ -86,7 +86,7 @@ async function callAI(prompt, maxTokens = 3000) {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0.2, maxOutputTokens: maxTokens }
       },
-      { headers: { "Content-Type": "application/json" }, timeout: 45000 }
+      { headers: { "Content-Type": "application/json" }, timeout: 90000 }
     );
     return r.data.candidates[0].content.parts[0].text;
   }
@@ -95,10 +95,14 @@ async function callAI(prompt, maxTokens = 3000) {
 // ─── STEP 1: Chain-of-thought news → stocks reasoning ────────────────────────
 // This is the core — every news event is traced to specific NSE stocks/ETFs
 
-function buildDeepResearchPrompt(news, fiidii, sectors, currentDateTime) {
+function buildDeepResearchPrompt(news, fiidii, sectors, currentDateTime, upcomingEarnings) {
   const allNews = news.slice(0, 25).map((n, i) =>
     `${i+1}. [${n.category.toUpperCase()}] ${n.title}\n   ${n.summary ? n.summary.slice(0, 150) : ""}\n   Source: ${n.source} | ${n.publishedAt ? n.publishedAt.slice(0, 16) : ""}`
   ).join("\n\n");
+
+  const earningsData = upcomingEarnings && upcomingEarnings.length > 0
+    ? upcomingEarnings.map(e => `${e.symbol}: ${e.purpose || "Board Meeting"} on ${e.date || "upcoming"}`).join("\n")
+    : "No upcoming earnings data";
 
   const sectorData = sectors.sectors.map(s =>
     `${s.name}: ${s.change >= 0 ? "+" : ""}${s.change.toFixed(2)}% | LTP: ${s.ltp} | Strength: ${s.strength}`
@@ -113,6 +117,7 @@ Smart Money: ${fiidii.smartMoneySignal ? fiidii.smartMoneySignal.label : "unknow
 
   return `You are a senior NSE equity research analyst with deep knowledge of Indian markets.
 Current time: ${currentDateTime} IST
+Upcoming Earnings/Board Meetings:\n${earningsData}\n
 
 TASK: Perform DEEP chain-of-thought analysis of all market inputs to generate tomorrow's actionable NSE trading watchlist.
 
@@ -313,7 +318,7 @@ TASK: Based ONLY on this new news, respond in valid JSON:
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
-async function generateResearch(news, fiidii, sectors) {
+async function generateResearch(news, fiidii, sectors, upcomingEarnings) {
   const now = Date.now();
 
   // Full deep analysis every 15 min
@@ -322,7 +327,7 @@ async function generateResearch(news, fiidii, sectors) {
     const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 
     try {
-      const prompt = buildDeepResearchPrompt(news, fiidii, sectors, ist);
+      const prompt = buildDeepResearchPrompt(news, fiidii, sectors, ist, upcomingEarnings || []);
       const raw    = await callAI(prompt, 6000);
       const parsed = extractJSON(raw);
       if (!parsed) throw new Error("extractJSON failed — raw length: " + (raw||"").length);
