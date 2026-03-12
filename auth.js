@@ -32,6 +32,19 @@ global.addBreakout = (data) => {
 };
 
 global.addTrade = (data) => { trades.unshift(data); if (trades.length > 200) trades.pop(); };
+
+// Pre-breakout store (populated by preBreakoutEngine via poller)
+const preBreakouts = [];
+global.preBreakouts = preBreakouts;
+global.addPreBreakout = (data) => {
+  const recent = preBreakouts.find(b =>
+    b.symbol === data.symbol && Date.now() - new Date(b.time).getTime() < 10 * 60 * 1000
+  );
+  if (recent) return; // dedupe within 10 min
+  preBreakouts.unshift(data);
+  if (preBreakouts.length > 100) preBreakouts.pop();
+  console.log("[preBreakout] Stored: " + data.symbol + " " + data.type);
+};
 global.updateTradeStatus = (id, status, orderId) => {
   const b = breakouts.find(b => b.id === id);
   if (b) { b.status = status; if (orderId) b.orderId = orderId; }
@@ -129,28 +142,19 @@ app.get("/api/watchlist/enriched", (req, res) => {
 // Pre-breakout candidates (fires BEFORE 5%+ move)
 app.get("/api/pre-breakouts", (req, res) => {
   try {
-    const { getPreBreakoutCandidates } = require("./preBreakoutEngine");
-    const candidates = getPreBreakoutCandidates();
-    // Enrich with current prices and format for iOS
-    const alerts = candidates.map(c => {
-      const ltp = (global.currentPrices || {})[c.symbol] ||
-                  (global.currentPrices || {})["NSE_EQ|" + c.symbol] || 0;
-      return {
-        symbol:   c.symbol,
-        price:    ltp,
-        type:     c.type     || null,
-        emoji:    c.emoji    || null,
-        msg:      c.msg      || null,
-        sector:   c.sector   || null,
-        change:   c.change   || null,
-        priority: c.priority || 50,
-        time:     new Date(c.alertedAt || Date.now()).toISOString()
-      };
-    }).filter(a => a.price > 0);
-
+    const type = req.query.type; // optional filter: IGNITION, VOLUME_SURGE, etc.
+    let alerts = (global.preBreakouts || []).slice();
+    if (type) alerts = alerts.filter(a => a.type === type);
+    // Refresh with latest price tick
+    alerts = alerts.map(a => ({
+      ...a,
+      price: (global.currentPrices || {})[a.symbol] ||
+             (global.currentPrices || {})["NSE_EQ|" + a.symbol] ||
+             a.price || 0
+    }));
     res.json({ count: alerts.length, alerts, updatedAt: new Date().toISOString() });
   } catch (e) {
-    res.json({ count: 0, alerts: [], updatedAt: new Date().toISOString() });
+    res.json({ count: 0, alerts: [], error: e.message, updatedAt: new Date().toISOString() });
   }
 });
 

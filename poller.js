@@ -175,18 +175,7 @@ async function startPoller(accessToken, instrumentKeys) {
   resetDailyFlags();
   global.accessToken = accessToken; // expose for stockIntelligence.js
 
-  // Pre-breakout store — feeds /api/pre-breakouts endpoint
-  if (!global.preBreakouts) global.preBreakouts = [];
-  global.addPreBreakout = (data) => {
-    const recent = global.preBreakouts.find(b =>
-      b.symbol === data.symbol && Date.now() - new Date(b.time).getTime() < 10 * 60 * 1000
-    );
-    if (recent) return; // dedupe within 10 min
-    data.alertedAt = Date.now();
-    global.preBreakouts.unshift(data);
-    if (global.preBreakouts.length > 100) global.preBreakouts.pop();
-    console.log("[preBreakout] Stored: " + data.symbol + " " + data.type);
-  };
+  // global.addPreBreakout is defined in auth.js
 
   await refreshMarketContext(accessToken);
   lastContextRefresh = Date.now();
